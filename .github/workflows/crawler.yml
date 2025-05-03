@@ -1,7 +1,7 @@
 name: News Crawler
 on:
   schedule:
-    - cron: "0 */2 * * *"  # 每2小时运行一次（UTC时间）
+    - cron: "0,30 * * * *"  # 每半小时运行一次（UTC时间）
   workflow_dispatch:  # 允许手动触发
 
 jobs:
