@@ -1,0 +1,21 @@
+name: News Crawler
+on:
+  schedule:
+    - cron: "0 */2 * * *"  # 每2小时运行一次（UTC时间）
+  workflow_dispatch:  # 允许手动触发
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run crawler
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        run: python news_crawler.py
