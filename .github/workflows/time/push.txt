@@ -1,0 +1,8 @@
+# 将 .yml 文件的更改添加到暂存区
+git add .github/workflows/crawler.yml
+
+# 提交更改
+git commit -m "Update GitHub Actions workflow"
+
+# 推送到远程仓库
+git push origin main
