@@ -22,15 +22,12 @@ jobs:
           python -m pip install --upgrade pip  # 确保 pip 是最新版本
           pip install -r requirements.txt     # 安装 requirements.txt 中的依赖
 
-
-      - name: Install Edge Driver
+      - name: Install Microsoft Edge WebDriver
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget
-          wget https://msedgedriver.azureedge.net/137.0.3296.4/edgedriver-linux64.zip
-          unzip edgedriver-linux64.zip
-          sudo mv msedgedriver /usr/local/bin/
-          sudo chmod +x /usr/local/bin/msedgedriver
+          EDGE_DRIVER_VERSION=$(curl -s https://msedgedriver.azureedge.net/LATEST_STABLE)
+          wget "https://msedgedriver.azureedge.net/$EDGE_DRIVER_VERSION/edgedriver_linux64.zip"
+          unzip edgedriver_linux64.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/msedgedriver
 
       - name: Run crawler
         env:
