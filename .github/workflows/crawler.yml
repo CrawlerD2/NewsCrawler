@@ -1,4 +1,4 @@
-name: News Crawler
+name: Baidu Hot News Crawler
 
 on:
   schedule:
@@ -8,6 +8,8 @@ on:
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # 设置超时时间
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,34 +19,62 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libxss1 libasound2 libgbm1  # 浏览器依赖库
 
       - name: Install Microsoft Edge Browser and WebDriver
         run: |
           # 安装 Microsoft Edge 浏览器
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg > /dev/null
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
-          sudo apt update
-          sudo apt install -y microsoft-edge-stable
+          sudo apt-get update -y
+          sudo apt-get install -y microsoft-edge-stable
 
           # 获取已安装的 Edge 版本
           EDGE_VERSION=$(microsoft-edge --version | awk '{print $3}')
           echo "Installed Edge version: $EDGE_VERSION"
 
           # 下载匹配的 WebDriver
-          wget "https://msedgedriver.azureedge.net/$EDGE_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
+          EDGEDRIVER_VERSION=$(echo $EDGE_VERSION | cut -d. -f1-3)
+          echo "Downloading WebDriver version: $EDGEDRIVER_VERSION"
+          wget "https://msedgedriver.azureedge.net/$EDGEDRIVER_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
           unzip edgedriver.zip -d /usr/local/bin
           chmod +x /usr/local/bin/msedgedriver
           rm edgedriver.zip
 
           # 验证安装
-          echo "WebDriver version:"
-          msedgedriver --version
+          echo "WebDriver info:"
+          /usr/local/bin/msedgedriver --version
+          ls -la /usr/local/bin/msedgedriver
 
-      - name: Run crawler
+      - name: Run the crawler
         env:
-          MONGO_URI: ${{ secrets.MONGO_URI }}
-        run: python news_crawler.py
+          MONGO_URI: ${{ secrets.MONGO_URI }}  # 从GitHub Secrets获取
+        run: |
+          # 设置环境变量标识GitHub Actions环境
+          export GITHUB_ACTIONS=true
+          
+          # 运行爬虫脚本并保存日志
+          python news_crawler.py 2>&1 | tee crawler.log
+          
+          # 上传日志作为artifact
+          echo "Crawler log:"
+          cat crawler.log
+          
+          # 检查是否有错误
+          if grep -q "ERROR" crawler.log; then
+            echo "::error::Errors detected in crawler log"
+            exit 1
+          fi
+
+      - name: Upload logs
+        if: always()  # 即使失败也上传日志
+        uses: actions/upload-artifact@v3
+        with:
+          name: crawler-logs
+          path: |
+            crawler.log
