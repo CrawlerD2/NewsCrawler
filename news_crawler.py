@@ -12,6 +12,17 @@ import os
 import re
 from pymongo import MongoClient
 from datetime import datetime
+import logging
+import sys
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 # MongoDB配置
 MONGO_URI = os.getenv("MONGO_URI",
@@ -25,15 +36,16 @@ def connect_to_mongodb():
         client = MongoClient(MONGO_URI)
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
+        logging.info("成功连接到MongoDB")
         return collection
     except Exception as e:
-        print(f"连接MongoDB失败: {e}")
+        logging.error(f"连接MongoDB失败: {e}")
         return None
 
 def save_to_mongodb(data, collection):
     """保存数据到MongoDB"""
     if collection is None:
-        print("无法保存到MongoDB: 连接无效")
+        logging.error("无法保存到MongoDB: 连接无效")
         return False
 
     try:
@@ -44,10 +56,10 @@ def save_to_mongodb(data, collection):
 
         # 插入数据
         result = collection.insert_many(data)
-        print(f"成功插入 {len(result.inserted_ids)} 条数据到MongoDB")
+        logging.info(f"成功插入 {len(result.inserted_ids)} 条数据到MongoDB")
         return True
     except Exception as e:
-        print(f"保存到MongoDB失败: {e}")
+        logging.error(f"保存到MongoDB失败: {e}")
         return False
 
 def get_baidu_hotsearch_data():
@@ -58,51 +70,64 @@ def get_baidu_hotsearch_data():
         'Referer': 'https://top.baidu.com/board?tab=realtime'
     }
     try:
-        response = requests.get(api_url, headers=headers)
+        response = requests.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"获取热搜数据失败: {e}")
+        logging.error(f"获取热搜数据失败: {e}")
         return None
 
 def setup_driver():
     """设置并返回WebDriver"""
     edge_options = Options()
-    edge_options.add_argument("--headless")  # 启用无头模式
+    edge_options.add_argument("--headless")
     edge_options.add_argument("--disable-gpu")
+    edge_options.add_argument("--no-sandbox")  # 重要：在Linux环境中需要
+    edge_options.add_argument("--disable-dev-shm-usage")  # 重要：在Docker/CI环境中需要
+    edge_options.add_argument("--remote-debugging-port=9222")
     edge_options.add_argument("--disable-blink-features=AutomationControlled")
-    edge_options.add_argument("--start-maximized")
     edge_options.add_argument("--disable-extensions")
     edge_options.add_argument("--disable-popup-blocking")
     edge_options.add_argument("--disable-notifications")
     edge_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     edge_options.add_experimental_option('useAutomationExtension', False)
 
-    # 自动检测Edge驱动路径
-    driver_path = find_edge_driver()
+    # 在GitHub Actions中使用特定路径
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        driver_path = "/usr/bin/msedgedriver"
+    else:
+        driver_path = find_edge_driver()
+    
     if not driver_path:
-        raise Exception("未找到Edge浏览器驱动，请确保已安装Microsoft Edge浏览器")
+        raise Exception("未找到Edge浏览器驱动")
 
     service = Service(executable_path=driver_path)
-    driver = webdriver.Edge(service=service, options=edge_options)
-
-    # 反检测设置
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.navigator.chrome = {runtime: {}, etc: {}};
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        """
-    })
-
-    return driver
+    try:
+        driver = webdriver.Edge(service=service, options=edge_options)
+        
+        # 反检测设置
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.navigator.chrome = {runtime: {}, etc: {}};
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            """
+        })
+        
+        logging.info("WebDriver初始化成功")
+        return driver
+    except Exception as e:
+        logging.error(f"WebDriver初始化失败: {e}")
+        raise
 
 def find_edge_driver():
     """尝试在常见位置查找Edge驱动"""
     possible_paths = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedgedriver.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedgedriver.exe",
+        r"/usr/bin/msedgedriver",  # Linux路径
+        r"/usr/local/bin/msedgedriver",  # Linux路径
         r"C:\edgedriver\msedgedriver.exe",
         os.path.expanduser(r"~\AppData\Local\Microsoft\Edge SxS\Application\msedgedriver.exe"),
         os.path.expanduser(r"~\AppData\Local\Microsoft\Edge\Application\msedgedriver.exe")
@@ -110,7 +135,9 @@ def find_edge_driver():
 
     for path in possible_paths:
         if os.path.exists(path):
+            logging.info(f"找到Edge驱动: {path}")
             return path
+    logging.warning("未找到Edge驱动")
     return None
 
 def extract_text_from_element(element):
@@ -118,44 +145,57 @@ def extract_text_from_element(element):
     if not element:
         return ""
 
-    # 创建元素的副本，避免修改原始元素
-    element_copy = BeautifulSoup(str(element), 'html.parser')
+    try:
+        # 创建元素的副本，避免修改原始元素
+        element_copy = BeautifulSoup(str(element), 'html.parser')
 
-    # 处理图片的alt文本
-    for img in element_copy.find_all('img'):
-        if img.get('alt'):
-            img.insert_after(f"[图片: {img['alt']}]")
+        # 处理图片的alt文本
+        for img in element_copy.find_all('img'):
+            if img.get('alt'):
+                img.insert_after(f"[图片: {img['alt']}]")
 
-    # 处理视频
-    for video in element_copy.find_all('video'):
-        if video.get('title'):
-            video.insert_after(f"[视频: {video['title']}]")
-        else:
-            video.insert_after("[视频内容]")
+        # 处理视频
+        for video in element_copy.find_all('video'):
+            if video.get('title'):
+                video.insert_after(f"[视频: {video['title']}]")
+            else:
+                video.insert_after("[视频内容]")
 
-    # 处理iframe嵌入内容
-    for iframe in element_copy.find_all('iframe'):
-        if iframe.get('title'):
-            iframe.insert_after(f"[嵌入内容: {iframe['title']}]")
-        else:
-            iframe.insert_after("[嵌入内容]")
+        # 处理iframe嵌入内容
+        for iframe in element_copy.find_all('iframe'):
+            if iframe.get('title'):
+                iframe.insert_after(f"[嵌入内容: {iframe['title']}]")
+            else:
+                iframe.insert_after("[嵌入内容]")
 
-    # 获取处理后的文本
-    text = element_copy.get_text(separator='\n', strip=True)
+        # 获取处理后的文本
+        text = element_copy.get_text(separator='\n', strip=True)
 
-    # 清理多余的空白和换行
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    text = text.strip()
-
-    return text
+        # 清理多余的空白和换行
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        return text.strip()
+    except Exception as e:
+        logging.error(f"提取文本失败: {e}")
+        return ""
 
 def get_news_detail(search_url):
     """获取新闻详情（标题和内容）"""
     driver = None
     try:
+        logging.info(f"开始获取新闻详情: {search_url}")
         driver = setup_driver()
+        
+        # 设置页面加载超时
+        driver.set_page_load_timeout(30)
+        
         driver.get(search_url)
-        time.sleep(3)
+        logging.info("已加载搜索页面")
+
+        # 等待页面加载
+        WebDriverWait(driver, 15).until(
+            lambda d: d.execute_script('return document.readyState') == 'complete'
+        )
+        time.sleep(2)
 
         # 处理可能的弹窗
         try:
@@ -165,102 +205,112 @@ def get_news_detail(search_url):
             )
             close_btn.click()
             time.sleep(1)
+            logging.info("已关闭弹窗")
         except:
             pass
 
         # 点击第一个搜索结果
-        first_result = WebDriverWait(driver, 10).until(
+        first_result = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "h3.c-title a"))
         )
         first_result_url = first_result.get_attribute('href')
+        logging.info(f"找到第一条结果: {first_result_url}")
+        
+        # 访问新闻页面
         driver.get(first_result_url)
-
-        # 等待页面加载
-        WebDriverWait(driver, 10).until(
+        WebDriverWait(driver, 15).until(
             lambda d: d.execute_script('return document.readyState') == 'complete'
         )
-        time.sleep(2)
+        time.sleep(3)
 
         # 滚动页面以加载懒加载内容
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+        time.sleep(1)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(1)
         driver.execute_script("window.scrollTo(0, 0)")
         time.sleep(1)
 
-        # 获取页面源码并用BeautifulSoup解析
+        # 获取页面源码
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
 
         # 获取新闻标题
-        title_selectors = [
-            'h1', 'div.article-title', 'div.title', 'h1.title',
-            'div.article-header h1', 'div.content-title', 'div.article h1',
-            'div._2oTsX > div.sKHSJ', 'div.article-head h1',
-            'header h1', 'article h1', 'main h1', 'h1.headline',
-            'title', 'meta[property="og:title"]', 'meta[name="title"]'
-        ]
-
-        news_title = "未获取到新闻标题"
-        for selector in title_selectors:
-            try:
-                if selector.startswith('meta'):
-                    title_element = soup.select_one(selector)
-                    if title_element and title_element.get('content', '').strip():
-                        news_title = title_element['content'].strip()
-                        break
-                else:
-                    title_element = soup.select_one(selector)
-                    if title_element and title_element.text.strip():
-                        news_title = title_element.text.strip()
-                        break
-            except:
-                continue
-
-        # 获取新闻正文容器
-        content_containers = [
-            'article', 'div.article-content', 'div.content',
-            'div.article-text', 'div.article-body', 'div.article-main',
-            'div.article', 'div._18p7x', 'div.content-article',
-            'div.article-detail', 'main', 'div.post-content',
-            'div.entry-content', 'div.text', 'div.story-content',
-            'div.news-content', 'div.content-wrapper'
-        ]
-
-        news_content = "未获取到新闻内容"
-        best_content = ""
-        max_length = 0
-
-        for container in content_containers:
-            try:
-                content_element = soup.select_one(container)
-                if content_element:
-                    content_text = extract_text_from_element(content_element)
-                    if len(content_text) > max_length:
-                        max_length = len(content_text)
-                        best_content = content_text
-            except:
-                continue
-
-        if best_content:
-            news_content = best_content
-
-        # 如果内容太短，尝试获取整个body
-        if len(news_content) < 200:
-            body_text = extract_text_from_element(soup.body)
-            if len(body_text) > len(news_content):
-                news_content = body_text
-
+        news_title = get_news_title(soup)
+        
+        # 获取新闻内容
+        news_content = get_news_content(soup)
+        
         # 清理内容
         news_content = clean_text(news_content)
 
+        logging.info(f"成功获取新闻: {news_title[:50]}...")
         return news_title, news_content
 
     except Exception as e:
-        print(f"获取新闻详情失败: {str(e)[:200]}")
+        logging.error(f"获取新闻详情失败: {str(e)}")
         return "获取失败", "获取失败"
     finally:
         if driver:
             driver.quit()
+
+def get_news_title(soup):
+    """从BeautifulSoup对象中提取新闻标题"""
+    title_selectors = [
+        'h1', 'div.article-title', 'div.title', 'h1.title',
+        'div.article-header h1', 'div.content-title', 'div.article h1',
+        'div._2oTsX > div.sKHSJ', 'div.article-head h1',
+        'header h1', 'article h1', 'main h1', 'h1.headline',
+        'title', 'meta[property="og:title"]', 'meta[name="title"]'
+    ]
+
+    for selector in title_selectors:
+        try:
+            if selector.startswith('meta'):
+                title_element = soup.select_one(selector)
+                if title_element and title_element.get('content', '').strip():
+                    return title_element['content'].strip()
+            else:
+                title_element = soup.select_one(selector)
+                if title_element and title_element.text.strip():
+                    return title_element.text.strip()
+        except:
+            continue
+    
+    # 如果以上选择器都失败，尝试从URL提取
+    return "未获取到新闻标题"
+
+def get_news_content(soup):
+    """从BeautifulSoup对象中提取新闻内容"""
+    content_containers = [
+        'article', 'div.article-content', 'div.content',
+        'div.article-text', 'div.article-body', 'div.article-main',
+        'div.article', 'div._18p7x', 'div.content-article',
+        'div.article-detail', 'main', 'div.post-content',
+        'div.entry-content', 'div.text', 'div.story-content',
+        'div.news-content', 'div.content-wrapper'
+    ]
+
+    best_content = ""
+    max_length = 0
+
+    for container in content_containers:
+        try:
+            content_element = soup.select_one(container)
+            if content_element:
+                content_text = extract_text_from_element(content_element)
+                if len(content_text) > max_length:
+                    max_length = len(content_text)
+                    best_content = content_text
+        except:
+            continue
+
+    if not best_content or len(best_content) < 200:
+        body_text = extract_text_from_element(soup.body)
+        if len(body_text) > len(best_content):
+            best_content = body_text
+
+    return best_content if best_content else "未获取到新闻内容"
 
 def clean_text(text):
     """清理文本内容"""
@@ -291,61 +341,73 @@ def clean_text(text):
 def parse_hotsearch_data(data):
     """解析热搜数据"""
     if not data or "data" not in data or "cards" not in data["data"]:
+        logging.warning("热搜数据格式不正确")
         return []
 
-    hotsearch_list = data["data"]["cards"][0].get("content", [])
-    top_content = data["data"]["cards"][0].get("topContent", [])
+    try:
+        hotsearch_list = data["data"]["cards"][0].get("content", [])
+        top_content = data["data"]["cards"][0].get("topContent", [])
+        parsed_data = []
+        
+        for idx, item in enumerate((top_content + hotsearch_list)[:3], 1):
+            search_url = item.get("url", "")
+            if not search_url.startswith('http'):
+                search_url = f"https://www.baidu.com/s?wd={item.get('word', '')}"
 
-    parsed_data = []
-    for idx, item in enumerate((top_content + hotsearch_list)[:3], 1):
-        search_url = item.get("url", "")
-        if not search_url.startswith('http'):
-            search_url = f"https://www.baidu.com/s?wd={item.get('word', '')}"
+            logging.info(f"处理第 {idx} 条热搜: {item.get('word', '')}")
+            news_title, news_content = get_news_detail(search_url)
 
-        print(f"\n正在处理第 {idx} 条热搜: {item.get('word', '')}")
-        news_title, news_content = get_news_detail(search_url)
+            parsed_data.append({
+                "hotsearch_title": item.get("word", ""),
+                "hotsearch_url": search_url,
+                "hot_index": item.get("hotScore", ""),
+                "hotsearch_desc": item.get("desc", ""),
+                "image_url": item.get("img", ""),
+                "is_top": "是" if item in top_content else "否",
+                "news_title": news_title,
+                "news_content": news_content[:10000],  # 限制内容长度
+                "source": "百度热搜",
+                "crawl_time": datetime.now()
+            })
 
-        parsed_data.append({
-            "hotsearch_title": item.get("word", ""),
-            "hotsearch_url": search_url,
-            "hot_index": item.get("hotScore", ""),
-            "hotsearch_desc": item.get("desc", ""),
-            "image_url": item.get("img", ""),
-            "is_top": "是" if item in top_content else "否",
-            "news_title": news_title,
-            "news_content": news_content[:10000],  # 限制内容长度
-            "source": "百度热搜",
-            "crawl_time": datetime.now()
-        })
+            time.sleep(3)  # 增加间隔避免被封
 
-        time.sleep(2)
-
-    return parsed_data
+        return parsed_data
+    except Exception as e:
+        logging.error(f"解析热搜数据失败: {e}")
+        return []
 
 if __name__ == "__main__":
-    # 连接MongoDB
-    collection = connect_to_mongodb()
+    try:
+        logging.info("爬虫程序启动")
+        
+        # 连接MongoDB
+        collection = connect_to_mongodb()
 
-    # 获取并处理数据
-    print("开始获取百度热搜数据...")
-    hotsearch_data = get_baidu_hotsearch_data()
+        # 获取并处理数据
+        logging.info("开始获取百度热搜数据...")
+        hotsearch_data = get_baidu_hotsearch_data()
 
-    if hotsearch_data:
-        print("开始解析热搜数据...")
-        parsed_data = parse_hotsearch_data(hotsearch_data)
+        if hotsearch_data:
+            logging.info("开始解析热搜数据...")
+            parsed_data = parse_hotsearch_data(hotsearch_data)
 
-        if parsed_data:
-            print("开始保存数据...")
-            # 保存到MongoDB
-            if collection is not None:
-                save_to_mongodb(parsed_data, collection)
+            if parsed_data:
+                logging.info(f"成功解析 {len(parsed_data)} 条数据")
+                
+                # 保存到MongoDB
+                if collection is not None:
+                    save_to_mongodb(parsed_data, collection)
+                else:
+                    logging.error("MongoDB连接失败，仅打印数据")
+                    for item in parsed_data:
+                        logging.info(f"热搜标题: {item['hotsearch_title']}")
             else:
-                logging.error("MongoDB连接失败，仅保存到本地文件")
-
-            # 保存到Excel
-            # if not save_to_excel(parsed_data):
-            #     print("尝试保存数据失败，请检查错误信息")
+                logging.warning("未解析到有效数据")
         else:
-            print("未解析到有效数据")
-    else:
-        print("未获取到百度热搜数据")
+            logging.error("未获取到百度热搜数据")
+            
+    except Exception as e:
+        logging.error(f"程序运行出错: {e}")
+    finally:
+        logging.info("爬虫程序结束")
