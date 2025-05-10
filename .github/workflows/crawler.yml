@@ -23,6 +23,7 @@ jobs:
           pip install pymongo                 # 显式安装 pymongo（如果 requirements.txt 中没有）
           pip install selenium                # 显式安装 selenium
           pip install webdriver-manager       # 显式安装 webdriver_manager
+	  pip install pandas       #显示安装pandas
 
       - name: Run crawler
         env:
