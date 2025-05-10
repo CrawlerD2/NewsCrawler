@@ -27,7 +27,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget
-          wget https://msedgedriver.azureedge.net/120.0.0.0/edgedriver-linux64.zip
+          wget https://msedgedriver.azureedge.net/137.0.3296.4/edgedriver-linux64.zip
           unzip edgedriver-linux64.zip
           sudo mv msedgedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/msedgedriver
