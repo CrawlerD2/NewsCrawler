@@ -19,17 +19,32 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip  # 确保 pip 是最新版本
-          pip install -r requirements.txt     # 安装 requirements.txt 中的依赖
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Install Microsoft Edge WebDriver
+      - name: Install Microsoft Edge Browser and WebDriver
         run: |
-          EDGE_DRIVER_VERSION=$(curl -s https://msedgedriver.azureedge.net/LATEST_STABLE)
-          wget "https://msedgedriver.azureedge.net/$EDGE_DRIVER_VERSION/edgedriver_linux64.zip"
-          unzip edgedriver_linux64.zip -d /usr/local/bin
+          # 安装 Microsoft Edge 浏览器
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg > /dev/null
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
+          sudo apt update
+          sudo apt install -y microsoft-edge-stable
+
+          # 获取已安装的 Edge 版本
+          EDGE_VERSION=$(microsoft-edge --version | awk '{print $3}')
+          echo "Installed Edge version: $EDGE_VERSION"
+
+          # 下载匹配的 WebDriver
+          wget "https://msedgedriver.azureedge.net/$EDGE_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
+          unzip edgedriver.zip -d /usr/local/bin
           chmod +x /usr/local/bin/msedgedriver
+          rm edgedriver.zip
+
+          # 验证安装
+          echo "WebDriver version:"
+          msedgedriver --version
 
       - name: Run crawler
         env:
-          MONGO_URI: ${{ secrets.MONGO_URI }}  # 环境变量，用于连接 MongoDB
+          MONGO_URI: ${{ secrets.MONGO_URI }}
         run: python news_crawler.py
