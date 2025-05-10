@@ -1,123 +1,464 @@
-import os
-import time
 import requests
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.edge.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.edge.options import Options
+import time
 from bs4 import BeautifulSoup
+import os
+import re
 from pymongo import MongoClient
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+from datetime import datetime
+
+# MongoDB配置
+MONGO_URI = os.getenv("MONGO_URI",
+                      "mongodb+srv://newscrrawler:qwe123@crrawlercluster.eencizs.mongodb.net/?retryWrites=true&w=majority&appName=CrrawlerCluster")
+DB_NAME = "mydatabase"
+COLLECTION_NAME = "read"
+
+
+def connect_to_mongodb():
+    """连接MongoDB数据库并返回集合对象"""
+    try:
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        collection = db[COLLECTION_NAME]
+        return collection
+    except Exception as e:
+        print(f"连接MongoDB失败: {e}")
+        return None
+
+
+def save_to_mongodb(data, collection):
+    """保存数据到MongoDB"""
+    if not collection:
+        print("无法保存到MongoDB: 连接无效")
+        return False
+
+    try:
+        # 添加时间戳
+        for item in data:
+            item['created_at'] = datetime.now()
+            item['updated_at'] = datetime.now()
+
+        # 插入数据
+        result = collection.insert_many(data)
+        print(f"成功插入 {len(result.inserted_ids)} 条数据到MongoDB")
+        return True
+    except Exception as e:
+        print(f"保存到MongoDB失败: {e}")
+        return False
+
+
+def get_baidu_hotsearch_data():
+    """获取百度热搜数据"""
+    api_url = "https://top.baidu.com/api/board?tab=realtime"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://top.baidu.com/board?tab=realtime'
+    }
+    try:
+        response = requests.get(api_url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"获取热搜数据失败: {e}")
+        return None
+
+
+def setup_driver():
+    """设置并返回WebDriver"""
+    edge_options = Options()
+    edge_options.add_argument("--disable-blink-features=AutomationControlled")
+    edge_options.add_argument("--start-maximized")
+    edge_options.add_argument("--disable-extensions")
+    edge_options.add_argument("--disable-popup-blocking")
+    edge_options.add_argument("--disable-notifications")
+    edge_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    edge_options.add_experimental_option('useAutomationExtension', False)
+
+    # 自动检测Edge驱动路径
+    driver_path = find_edge_driver()
+    if not driver_path:
+        raise Exception("未找到Edge浏览器驱动，请确保已安装Microsoft Edge浏览器")
+
+    service = Service(executable_path=driver_path)
+    driver = webdriver.Edge(service=service, options=edge_options)
+
+    # 反检测设置
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.navigator.chrome = {runtime: {}, etc: {}};
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """
+    })
+
+    return driver
+
+
+def find_edge_driver():
+    """尝试在常见位置查找Edge驱动"""
+    possible_paths = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedgedriver.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedgedriver.exe",
+        r"C:\edgedriver\msedgedriver.exe",
+        os.path.expanduser(r"~\AppData\Local\Microsoft\Edge SxS\Application\msedgedriver.exe"),
+        os.path.expanduser(r"~\AppData\Local\Microsoft\Edge\Application\msedgedriver.exe")
+    ]
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def extract_text_from_element(element):
+    """从HTML元素中提取文本（包括图片alt文本）"""
+    if not element:
+        return ""
+
+    # 创建元素的副本，避免修改原始元素
+    element_copy = BeautifulSoup(str(element), 'html.parser')
+
+    # 处理图片的alt文本
+    for img in element_copy.find_all('img'):
+        if img.get('alt'):
+            img.insert_after(f"[图片: {img['alt']}]")
+
+    # 处理视频
+    for video in element_copy.find_all('video'):
+        if video.get('title'):
+            video.insert_after(f"[视频: {video['title']}]")
+        else:
+            video.insert_after("[视频内容]")
+
+    # 处理iframe嵌入内容
+    for iframe in element_copy.find_all('iframe'):
+        if iframe.get('title'):
+            iframe.insert_after(f"[嵌入内容: {iframe['title']}]")
+        else:
+            iframe.insert_after("[嵌入内容]")
+
+    # 获取处理后的文本
+    text = element_copy.get_text(separator='\n', strip=True)
+
+    # 清理多余的空白和换行
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    text = text.strip()
+
+    return text
+
+
+def get_news_detail(search_url):
+    """获取新闻详情（标题和内容）"""
+    driver = None
+    try:
+        driver = setup_driver()
+        driver.get(search_url)
+        time.sleep(3)
+
+        # 处理可能的弹窗
+        try:
+            driver.execute_script('window.scrollBy(0, 100)')
+            close_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "div.close-btn, span.c-icon-close, button.close"))
+            )
+            close_btn.click()
+            time.sleep(1)
+        except:
+            pass
+
+        # 点击第一个搜索结果
+        first_result = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "h3.c-title a"))
+        )
+        first_result_url = first_result.get_attribute('href')
+        driver.get(first_result_url)
+
+        # 等待页面加载
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script('return document.readyState') == 'complete'
+        )
+        time.sleep(2)
+
+        # 滚动页面以加载懒加载内容
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, 0)")
+        time.sleep(1)
+
+        # 获取页面源码并用BeautifulSoup解析
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
+
+        # 获取新闻标题
+        title_selectors = [
+            'h1', 'div.article-title', 'div.title', 'h1.title',
+            'div.article-header h1', 'div.content-title', 'div.article h1',
+            'div._2oTsX > div.sKHSJ', 'div.article-head h1',
+            'header h1', 'article h1', 'main h1', 'h1.headline',
+            'title', 'meta[property="og:title"]', 'meta[name="title"]'
+        ]
+
+        news_title = "未获取到新闻标题"
+        for selector in title_selectors:
+            try:
+                if selector.startswith('meta'):
+                    title_element = soup.select_one(selector)
+                    if title_element and title_element.get('content', '').strip():
+                        news_title = title_element['content'].strip()
+                        break
+                else:
+                    title_element = soup.select_one(selector)
+                    if title_element and title_element.text.strip():
+                        news_title = title_element.text.strip()
+                        break
+            except:
+                continue
+
+        # 获取新闻正文容器
+        content_containers = [
+            'article', 'div.article-content', 'div.content',
+            'div.article-text', 'div.article-body', 'div.article-main',
+            'div.article', 'div._18p7x', 'div.content-article',
+            'div.article-detail', 'main', 'div.post-content',
+            'div.entry-content', 'div.text', 'div.story-content',
+            'div.news-content', 'div.content-wrapper'
+        ]
+
+        news_content = "未获取到新闻内容"
+        best_content = ""
+        max_length = 0
+
+        for container in content_containers:
+            try:
+                content_element = soup.select_one(container)
+                if content_element:
+                    content_text = extract_text_from_element(content_element)
+                    if len(content_text) > max_length:
+                        max_length = len(content_text)
+                        best_content = content_text
+            except:
+                continue
+
+        if best_content:
+            news_content = best_content
+
+        # 如果内容太短，尝试获取整个body
+        if len(news_content) < 200:
+            body_text = extract_text_from_element(soup.body)
+            if len(body_text) > len(news_content):
+                news_content = body_text
+
+        # 清理内容
+        news_content = clean_text(news_content)
+
+        return news_title, news_content
+
+    except Exception as e:
+        print(f"获取新闻详情失败: {str(e)[:200]}")
+        return "获取失败", "获取失败"
+    finally:
+        if driver:
+            driver.quit()
+
+
+def clean_text(text):
+    """清理文本内容"""
+    if not text:
+        return text
+
+    # 移除多余的空白字符
+    text = re.sub(r'\s+', ' ', text)
+
+    # 移除常见的版权声明、免责声明等
+    patterns = [
+        r'版权声明.*$', r'免责声明.*$', r'本文来源.*$',
+        r'编辑.*$', r'记者.*$', r'点击进入专题.*$',
+        r'相关报道.*$', r'责任编辑.*$', r'作者.*$',
+        r'声明：.*$', r'【.*】$'
+    ]
+
+    for pattern in patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+    # 移除开头和结尾的非文字内容
+    text = text.strip()
+    text = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5]+', '', text)
+    text = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', text)
+
+    return text.strip()
+
+
+def parse_hotsearch_data(data):
+    """解析热搜数据"""
+    if not data or "data" not in data or "cards" not in data["data"]:
+        return []
+
+    hotsearch_list = data["data"]["cards"][0].get("content", [])
+    top_content = data["data"]["cards"][0].get("topContent", [])
+
+    parsed_data = []
+    for idx, item in enumerate((top_content + hotsearch_list)[:3], 1):
+        search_url = item.get("url", "")
+        if not search_url.startswith('http'):
+            search_url = f"https://www.baidu.com/s?wd={item.get('word', '')}"
+
+        print(f"\n正在处理第 {idx} 条热搜: {item.get('word', '')}")
+        news_title, news_content = get_news_detail(search_url)
+
+        parsed_data.append({
+            "hotsearch_title": item.get("word", ""),
+            "hotsearch_url": search_url,
+            "hot_index": item.get("hotScore", ""),
+            "hotsearch_desc": item.get("desc", ""),
+            "image_url": item.get("img", ""),
+            "is_top": "是" if item in top_content else "否",
+            "news_title": news_title,
+            "news_content": news_content[:10000],  # 限制内容长度
+            "source": "百度热搜",
+            "crawl_time": datetime.now()
+        })
+
+        time.sleep(2)
+
+    return parsed_data
+
+
+# def save_to_excel(data, filename="baidu_hotsearch.xlsx"):
+    """保存数据到Excel"""
+    try:
+        # 使用openpyxl作为备用引擎
+        try:
+            writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+        except ImportError:
+            writer = pd.ExcelWriter(filename, engine='openpyxl')
+
+        # 转换字段名为中文用于Excel显示
+        excel_data = []
+        for item in data:
+            excel_data.append({
+                "热搜标题": item.get("hotsearch_title", ""),
+                "热搜链接": item.get("hotsearch_url", ""),
+                "热度指数": item.get("hot_index", ""),
+                "热搜描述": item.get("hotsearch_desc", ""),
+                "图片链接": item.get("image_url", ""),
+                "是否置顶": item.get("is_top", ""),
+                "新闻标题": item.get("news_title", ""),
+                "新闻内容": item.get("news_content", "")
+            })
+
+        df = pd.DataFrame(excel_data,
+                          columns=["热搜标题", "热搜链接", "热度指数", "热搜描述", "图片链接", "是否置顶", "新闻标题",
+                                   "新闻内容"])
+        df.to_excel(writer, index=False, sheet_name='百度热搜')
+
+        # 设置列宽（仅xlsxwriter支持）
+        if writer.engine == 'xlsxwriter':
+            worksheet = writer.sheets['百度热搜']
+            worksheet.set_column('A:A', 20)  # 热搜标题
+            worksheet.set_column('B:B', 50)  # 热搜链接
+            worksheet.set_column('C:C', 10)  # 热度指数
+            worksheet.set_column('D:D', 30)  # 热搜描述
+            worksheet.set_column('E:E', 50)  # 图片链接
+            worksheet.set_column('F:F', 5)  # 是否置顶
+            worksheet.set_column('G:G', 30)  # 新闻标题
+            worksheet.set_column('H:H', 80)  # 新闻内容
+
+        writer.close()
+        print(f"数据已保存到 {filename}")
+        return True
+    except Exception as e:
+        print(f"保存Excel文件失败: {e}")
+        # 尝试使用csv作为备用格式
+        try:
+            csv_filename = filename.replace('.xlsx', '.csv')
+            df = pd.DataFrame(excel_data,
+                              columns=["热搜标题", "热搜链接", "热度指数", "热搜描述", "图片链接", "是否置顶",
+                                       "新闻标题", "新闻内容"])
+            df.to_csv(csv_filename, index=False, encoding='utf_8_sig')
+            print(f"数据已保存到 {csv_filename} (CSV格式)")
+            return True
+        except Exception as e2:
+            print(f"保存CSV文件也失败: {e2}")
+            return False
+
+
+import logging
+from pymongo import MongoClient
+from datetime import datetime
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # MongoDB配置
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://newscrrawler:qwe123@crrawlercluster.eencizs.mongodb.net/?retryWrites=true&w=majority&appName=CrrawlerCluster")
 DB_NAME = "mydatabase"
 COLLECTION_NAME = "read"
 
-# 请求头伪装
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
-
-
-def init_db():
-    """初始化MongoDB连接"""
-    client = MongoClient(MONGO_URI)
-    db = client[DB_NAME]
-    return db[COLLECTION_NAME]
-
-
-def fetch_baidu_hot():
-    """抓取百度热榜"""
-    url = "https://top.baidu.com/board?tab=realtime"
+def connect_to_mongodb():
+    """连接MongoDB数据库并返回集合对象"""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('.category-wrap_iQLoo')
-        results = []
-        for item in items[:10]:  # 取前10条
-            title = item.select_one('.c-single-text-ellipsis').text.strip()
-            link = item.select_one('a')['href']
-            results.append({"source": "百度", "title": title, "link": link})
-        return results
+        client = MongoClient(MONGO_URI)
+        db = client[DB_NAME]
+        collection = db[COLLECTION_NAME]
+        # 测试连接
+        client.server_info()
+        logging.info("成功连接到MongoDB")
+        return collection
     except Exception as e:
-        print(f"百度热榜抓取失败: {str(e)}")
-        return []
+        logging.error(f"连接MongoDB失败: {e}")
+        return None
 
+def save_to_mongodb(data, collection):
+    """保存数据到MongoDB"""
+    if collection is None:
+        logging.error("无法保存到MongoDB: 连接无效")
+        return False
 
-# def fetch_weibo_hot():
-#     url = "https://s.weibo.com/top/summary"
-#     try:
-#         options = Options()
-#         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-#         # 如果需要代理，取消注释以下行
-#         # options.add_argument("--proxy-server=http://your_proxy_server:port")
-#
-#         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-#         driver.get(url)
-#         time.sleep(15)  # 等待页面加载完成
-#
-#         soup = BeautifulSoup(driver.page_source, 'html.parser')
-#         items = soup.select('tr[action-type="hover"]')
-#         if not items:
-#             print("未找到符合条件的元素，可能是网页结构发生变化或被反爬虫限制。")
-#             driver.quit()
-#             return []
-#
-#         results = []
-#         for item in items[:10]:
-#             title = item.select_one('a').text.strip()
-#             link = "https://s.weibo.com" + item.select_one('a')['href']
-#             results.append({"source": "微博", "title": title, "link": link})
-#
-#         driver.quit()
-#         return results
-#     except Exception as e:
-#         print(f"微博热搜抓取失败: {str(e)}")
-#         return []
-
-
-def fetch_zhihu_hot():
-    """抓取知乎热榜"""
-    url = "https://www.zhihu.com/billboard"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('.HotList-item')
-        results = []
-        for item in items[:10]:
-            title = item.select_one('.HotList-itemTitle').text.strip()
-            link = item.select_one('a')['href']
-            results.append({"source": "知乎", "title": title, "link": link})
-        return results
+        # 添加时间戳
+        for item in data:
+            item['created_at'] = datetime.now()
+            item['updated_at'] = datetime.now()
+
+        # 插入数据
+        result = collection.insert_many(data)
+        logging.info(f"成功插入 {len(result.inserted_ids)} 条数据到MongoDB")
+        return True
     except Exception as e:
-        print(f"知乎热榜抓取失败: {str(e)}")
-        return []
-
-
-def save_to_mongo(data):
-    """保存到数据库"""
-    if not data:
-        return
-    collection = init_db()
-    try:
-        collection.insert_many(data)
-        print(f"成功保存{len(data)}条数据")
-    except Exception as e:
-        print(f"数据库写入失败: {str(e)}")
-
-
-def main():
-    # 抓取所有平台数据
-    all_data = []
-    all_data.extend(fetch_baidu_hot())
-    # all_data.extend(fetch_weibo_hot())
-    all_data.extend(fetch_zhihu_hot())
-
-    # 去重（避免同一新闻多次存储）
-    unique_data = {item["title"]: item for item in all_data}.values()
-    save_to_mongo(list(unique_data))
-
+        logging.error(f"保存到MongoDB失败: {e}")
+        return False
 
 if __name__ == "__main__":
-    main()
+    # 连接MongoDB
+    collection = connect_to_mongodb()
+
+    # 获取并处理数据
+    print("开始获取百度热搜数据...")
+    hotsearch_data = get_baidu_hotsearch_data()
+
+    if hotsearch_data:
+        print("开始解析热搜数据...")
+        parsed_data = parse_hotsearch_data(hotsearch_data)
+
+        if parsed_data:
+            print("开始保存数据...")
+            # 保存到MongoDB
+            if collection is not None:
+                save_to_mongodb(parsed_data, collection)
+            else:
+                logging.error("MongoDB连接失败，仅保存到本地文件")
+
+            # 保存到Excel
+            # if not save_to_excel(parsed_data):
+            #     print("尝试保存数据失败，请检查错误信息")
+        else:
+            print("未解析到有效数据")
+    else:
+        print("未获取到百度热搜数据")
