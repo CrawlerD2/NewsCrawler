@@ -19,7 +19,6 @@ MONGO_URI = os.getenv("MONGO_URI",
 DB_NAME = "mydatabase"
 COLLECTION_NAME = "read"
 
-
 def connect_to_mongodb():
     """连接MongoDB数据库并返回集合对象"""
     try:
@@ -31,10 +30,9 @@ def connect_to_mongodb():
         print(f"连接MongoDB失败: {e}")
         return None
 
-
 def save_to_mongodb(data, collection):
     """保存数据到MongoDB"""
-    if not collection:
+    if collection is None:
         print("无法保存到MongoDB: 连接无效")
         return False
 
@@ -52,7 +50,6 @@ def save_to_mongodb(data, collection):
         print(f"保存到MongoDB失败: {e}")
         return False
 
-
 def get_baidu_hotsearch_data():
     """获取百度热搜数据"""
     api_url = "https://top.baidu.com/api/board?tab=realtime"
@@ -68,10 +65,11 @@ def get_baidu_hotsearch_data():
         print(f"获取热搜数据失败: {e}")
         return None
 
-
 def setup_driver():
     """设置并返回WebDriver"""
     edge_options = Options()
+    edge_options.add_argument("--headless")  # 启用无头模式
+    edge_options.add_argument("--disable-gpu")
     edge_options.add_argument("--disable-blink-features=AutomationControlled")
     edge_options.add_argument("--start-maximized")
     edge_options.add_argument("--disable-extensions")
@@ -100,7 +98,6 @@ def setup_driver():
 
     return driver
 
-
 def find_edge_driver():
     """尝试在常见位置查找Edge驱动"""
     possible_paths = [
@@ -115,7 +112,6 @@ def find_edge_driver():
         if os.path.exists(path):
             return path
     return None
-
 
 def extract_text_from_element(element):
     """从HTML元素中提取文本（包括图片alt文本）"""
@@ -152,7 +148,6 @@ def extract_text_from_element(element):
     text = text.strip()
 
     return text
-
 
 def get_news_detail(search_url):
     """获取新闻详情（标题和内容）"""
@@ -267,7 +262,6 @@ def get_news_detail(search_url):
         if driver:
             driver.quit()
 
-
 def clean_text(text):
     """清理文本内容"""
     if not text:
@@ -293,7 +287,6 @@ def clean_text(text):
     text = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', text)
 
     return text.strip()
-
 
 def parse_hotsearch_data(data):
     """解析热搜数据"""
@@ -328,112 +321,6 @@ def parse_hotsearch_data(data):
         time.sleep(2)
 
     return parsed_data
-
-
-# def save_to_excel(data, filename="baidu_hotsearch.xlsx"):
-    """保存数据到Excel"""
-    try:
-        # 使用openpyxl作为备用引擎
-        try:
-            writer = pd.ExcelWriter(filename, engine='xlsxwriter')
-        except ImportError:
-            writer = pd.ExcelWriter(filename, engine='openpyxl')
-
-        # 转换字段名为中文用于Excel显示
-        excel_data = []
-        for item in data:
-            excel_data.append({
-                "热搜标题": item.get("hotsearch_title", ""),
-                "热搜链接": item.get("hotsearch_url", ""),
-                "热度指数": item.get("hot_index", ""),
-                "热搜描述": item.get("hotsearch_desc", ""),
-                "图片链接": item.get("image_url", ""),
-                "是否置顶": item.get("is_top", ""),
-                "新闻标题": item.get("news_title", ""),
-                "新闻内容": item.get("news_content", "")
-            })
-
-        df = pd.DataFrame(excel_data,
-                          columns=["热搜标题", "热搜链接", "热度指数", "热搜描述", "图片链接", "是否置顶", "新闻标题",
-                                   "新闻内容"])
-        df.to_excel(writer, index=False, sheet_name='百度热搜')
-
-        # 设置列宽（仅xlsxwriter支持）
-        if writer.engine == 'xlsxwriter':
-            worksheet = writer.sheets['百度热搜']
-            worksheet.set_column('A:A', 20)  # 热搜标题
-            worksheet.set_column('B:B', 50)  # 热搜链接
-            worksheet.set_column('C:C', 10)  # 热度指数
-            worksheet.set_column('D:D', 30)  # 热搜描述
-            worksheet.set_column('E:E', 50)  # 图片链接
-            worksheet.set_column('F:F', 5)  # 是否置顶
-            worksheet.set_column('G:G', 30)  # 新闻标题
-            worksheet.set_column('H:H', 80)  # 新闻内容
-
-        writer.close()
-        print(f"数据已保存到 {filename}")
-        return True
-    except Exception as e:
-        print(f"保存Excel文件失败: {e}")
-        # 尝试使用csv作为备用格式
-        try:
-            csv_filename = filename.replace('.xlsx', '.csv')
-            df = pd.DataFrame(excel_data,
-                              columns=["热搜标题", "热搜链接", "热度指数", "热搜描述", "图片链接", "是否置顶",
-                                       "新闻标题", "新闻内容"])
-            df.to_csv(csv_filename, index=False, encoding='utf_8_sig')
-            print(f"数据已保存到 {csv_filename} (CSV格式)")
-            return True
-        except Exception as e2:
-            print(f"保存CSV文件也失败: {e2}")
-            return False
-
-
-import logging
-from pymongo import MongoClient
-from datetime import datetime
-
-# 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# MongoDB配置
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://newscrrawler:qwe123@crrawlercluster.eencizs.mongodb.net/?retryWrites=true&w=majority&appName=CrrawlerCluster")
-DB_NAME = "mydatabase"
-COLLECTION_NAME = "read"
-
-def connect_to_mongodb():
-    """连接MongoDB数据库并返回集合对象"""
-    try:
-        client = MongoClient(MONGO_URI)
-        db = client[DB_NAME]
-        collection = db[COLLECTION_NAME]
-        # 测试连接
-        client.server_info()
-        logging.info("成功连接到MongoDB")
-        return collection
-    except Exception as e:
-        logging.error(f"连接MongoDB失败: {e}")
-        return None
-
-def save_to_mongodb(data, collection):
-    """保存数据到MongoDB"""
-    if collection is None:
-        logging.error("无法保存到MongoDB: 连接无效")
-        return False
-
-    try:
-        # 添加时间戳
-        for item in data:
-            item['created_at'] = datetime.now()
-            item['updated_at'] = datetime.now()
-
-        # 插入数据
-        result = collection.insert_many(data)
-        logging.info(f"成功插入 {len(result.inserted_ids)} 条数据到MongoDB")
-        return True
-    except Exception as e:
-        logging.error(f"保存到MongoDB失败: {e}")
-        return False
 
 if __name__ == "__main__":
     # 连接MongoDB
