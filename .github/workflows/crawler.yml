@@ -3,83 +3,140 @@ name: Baidu Hot News Crawler
 on:
   schedule:
     - cron: "0,30 * * * *"  # 每半小时运行一次（UTC时间）
-  workflow_dispatch:         # 允许手动触发
+  workflow_dispatch:        # 允许手动触发
+  push:
+    branches: [ main ]     # 新增：main分支推送时也触发（测试用）
 
 jobs:
   crawl:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30      # 设置超时时间
+    runs-on: ubuntu-22.04   # 升级到LTS版本
+    timeout-minutes: 30
     
+    # 新增策略配置
+    strategy:
+      fail-fast: false      # 允许其他job继续执行即使当前job失败
+      matrix:
+        python-version: ["3.10"]  # 支持多版本测试
+
+    # 新增环境变量全局配置
+    env:
+      TZ: Asia/Shanghai     # 设置时区
+      PYTHONUNBUFFERED: 1   # 禁用Python输出缓冲
+
     steps:
-      # 1. 检出代码
+      # 1. 检出代码（优化缓存配置）
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # 获取完整git历史
+          persist-credentials: false
 
-      # 2. 设置Python环境
-      - name: Set up Python 3.10
+      # 2. 设置Python环境（支持matrix多版本）
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'       # 启用pip缓存
 
-      # 3. 安装依赖（合并了apt和pip安装步骤）
-      - name: Install dependencies
+      # 3. 安装依赖（优化安装顺序和缓存）
+      - name: Install system dependencies
         run: |
-          # 系统依赖
           sudo apt-get update -y
           sudo apt-get install -y \
             libnss3 libxss1 libasound2 libgbm1 \
-            unzip curl gnupg  # 添加了unzip和curl的显式安装
+            unzip curl gnupg ca-certificates \
+            fonts-noto-cjk  # 新增：中文字体支持
+          sudo apt-get clean
 
-          # Python依赖
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # 4. 安装Edge浏览器和WebDriver（优化了版本获取逻辑）
-      - name: Install Microsoft Edge and WebDriver
+      - name: Install Python dependencies
         run: |
-          # 安装Edge浏览器
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg > /dev/null
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
-          sudo apt-get update -y
-          sudo apt-get install -y microsoft-edge-stable
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
+          pip list
 
-          # 获取并安装匹配的WebDriver
-          EDGE_VERSION=$(microsoft-edge --version | awk '{print $3}')
-          echo "Installed Edge version: $EDGE_VERSION"
+      # 4. 浏览器环境配置（增加重试机制）
+      - name: Setup Browser Environment
+        timeout-minutes: 10
+        run: |
+          # 安装Edge（增加重试逻辑）
+          for i in {1..3}; do
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg >/dev/null &&
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list &&
+            sudo apt-get update -y &&
+            sudo apt-get install -y microsoft-edge-stable && break || sleep 30
+          done
+
+          # WebDriver安装（增加版本验证）
+          EDGE_FULL_VERSION=$(microsoft-edge --version | awk '{print $3}')
+          echo "EDGE_FULL_VERSION=$EDGE_FULL_VERSION" >> $GITHUB_ENV
           
-          EDGEDRIVER_VERSION=$(echo $EDGE_VERSION | cut -d. -f1-3)
-          echo "Downloading WebDriver version: $EDGEDRIVER_VERSION"
+          EDGEDRIVER_VERSION=$(echo $EDGE_FULL_VERSION | cut -d. -f1-3)
+          echo "Downloading WebDriver v$EDGEDRIVER_VERSION"
           
-          wget -q "https://msedgedriver.azureedge.net/$EDGEDRIVER_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
+          wget --tries=3 --retry-connrefused "https://msedgedriver.azureedge.net/$EDGEDRIVER_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
           unzip -q edgedriver.zip -d /usr/local/bin
           chmod +x /usr/local/bin/msedgedriver
           rm edgedriver.zip
 
-          # 验证安装
-          echo "WebDriver path: $(which msedgedriver)"
-          /usr/local/bin/msedgedriver --version
-
-      # 5. 运行爬虫（优化了日志处理）
-      - name: Run the crawler
-        env:
-          MONGO_URI: ${{ secrets.MONGO_URI }}
-          GITHUB_ACTIONS: "true"  # 直接在这里设置环境变量
-        run: |
-          # 运行爬虫并记录日志
-          python news_crawler.py 2>&1 | tee crawler.log
-          
-          # 检查错误（忽略大小写）
-          if grep -qi "error" crawler.log; then
-            echo "::error::Errors detected in crawler log"
+          # 版本一致性检查
+          if ! /usr/local/bin/msedgedriver --version | grep -q $EDGEDRIVER_VERSION; then
+            echo "::error::WebDriver version mismatch!"
             exit 1
           fi
 
-      # 6. 上传日志（关键修改：升级到v4）
-      - name: Upload logs
-        if: always()  # 即使失败也上传
-        uses: actions/upload-artifact@v4  # 从v3升级到v4
+      # 5. 运行爬虫（增强错误处理）
+      - name: Run crawler with monitoring
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          HEADLESS: "true"   # 新增无头模式参数
+        run: |
+          # 启动时间监控
+          START_TIME=$(date +%s)
+          
+          # 带超时运行的爬虫
+          timeout 25m python news_crawler.py 2>&1 | tee -a crawler.log
+          
+          # 检查退出状态
+          if [ ${PIPESTATUS[0]} -eq 124 ]; then
+            echo "::error::Crawler timed out after 25 minutes"
+            exit 1
+          fi
+          
+          # 错误分析
+          ERROR_COUNT=$(grep -ci "error" crawler.log || true)
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "::group::Error Details"
+            grep -i "error" crawler.log | head -n 10
+            echo "::endgroup::"
+            echo "::error::Found $ERROR_COUNT errors in log"
+            exit 1
+          fi
+          
+          # 性能报告
+          DURATION=$(( $(date +%s) - $START_TIME ))
+          echo "::notice::Crawler completed in $((DURATION/60))m$((DURATION%60))s"
+
+      # 6. 日志处理（增强artifact管理）
+      - name: Upload logs and reports
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: crawler-logs-${{ github.run_id }}  # 添加run_id使日志唯一
+          name: crawler-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             crawler.log
-          retention-days: 3  # 自动3天后删除日志
+            !*.pyc          # 排除编译文件
+          retention-days: 7  # 延长保留时间
+          compression-level: 9
+
+      # 新增：结果通知（可选）
+      - name: Notify status
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { status } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            console.log(`Workflow status: ${status}`);
