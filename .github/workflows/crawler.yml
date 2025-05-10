@@ -3,78 +3,83 @@ name: Baidu Hot News Crawler
 on:
   schedule:
     - cron: "0,30 * * * *"  # 每半小时运行一次（UTC时间）
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:         # 允许手动触发
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 设置超时时间
+    timeout-minutes: 30      # 设置超时时间
     
     steps:
+      # 1. 检出代码
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2. 设置Python环境
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
-      - name: Install Python dependencies
+      # 3. 安装依赖（合并了apt和pip安装步骤）
+      - name: Install dependencies
         run: |
+          # 系统依赖
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libnss3 libxss1 libasound2 libgbm1 \
+            unzip curl gnupg  # 添加了unzip和curl的显式安装
+
+          # Python依赖
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          sudo apt-get update
-          sudo apt-get install -y libnss3 libxss1 libasound2 libgbm1  # 浏览器依赖库
 
-      - name: Install Microsoft Edge Browser and WebDriver
+      # 4. 安装Edge浏览器和WebDriver（优化了版本获取逻辑）
+      - name: Install Microsoft Edge and WebDriver
         run: |
-          # 安装 Microsoft Edge 浏览器
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg > /dev/null
+          # 安装Edge浏览器
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg > /dev/null
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
           sudo apt-get update -y
           sudo apt-get install -y microsoft-edge-stable
 
-          # 获取已安装的 Edge 版本
+          # 获取并安装匹配的WebDriver
           EDGE_VERSION=$(microsoft-edge --version | awk '{print $3}')
           echo "Installed Edge version: $EDGE_VERSION"
-
-          # 下载匹配的 WebDriver
+          
           EDGEDRIVER_VERSION=$(echo $EDGE_VERSION | cut -d. -f1-3)
           echo "Downloading WebDriver version: $EDGEDRIVER_VERSION"
-          wget "https://msedgedriver.azureedge.net/$EDGEDRIVER_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
-          unzip edgedriver.zip -d /usr/local/bin
+          
+          wget -q "https://msedgedriver.azureedge.net/$EDGEDRIVER_VERSION/edgedriver_linux64.zip" -O edgedriver.zip
+          unzip -q edgedriver.zip -d /usr/local/bin
           chmod +x /usr/local/bin/msedgedriver
           rm edgedriver.zip
 
           # 验证安装
-          echo "WebDriver info:"
+          echo "WebDriver path: $(which msedgedriver)"
           /usr/local/bin/msedgedriver --version
-          ls -la /usr/local/bin/msedgedriver
 
+      # 5. 运行爬虫（优化了日志处理）
       - name: Run the crawler
         env:
-          MONGO_URI: ${{ secrets.MONGO_URI }}  # 从GitHub Secrets获取
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          GITHUB_ACTIONS: "true"  # 直接在这里设置环境变量
         run: |
-          # 设置环境变量标识GitHub Actions环境
-          export GITHUB_ACTIONS=true
-          
-          # 运行爬虫脚本并保存日志
+          # 运行爬虫并记录日志
           python news_crawler.py 2>&1 | tee crawler.log
           
-          # 上传日志作为artifact
-          echo "Crawler log:"
-          cat crawler.log
-          
-          # 检查是否有错误
-          if grep -q "ERROR" crawler.log; then
+          # 检查错误（忽略大小写）
+          if grep -qi "error" crawler.log; then
             echo "::error::Errors detected in crawler log"
             exit 1
           fi
 
+      # 6. 上传日志（关键修改：升级到v4）
       - name: Upload logs
-        if: always()  # 即使失败也上传日志
-        uses: actions/upload-artifact@v3
+        if: always()  # 即使失败也上传
+        uses: actions/upload-artifact@v4  # 从v3升级到v4
         with:
-          name: crawler-logs
+          name: crawler-logs-${{ github.run_id }}  # 添加run_id使日志唯一
           path: |
             crawler.log
+          retention-days: 3  # 自动3天后删除日志
