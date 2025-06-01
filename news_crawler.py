@@ -21,7 +21,7 @@ from webdriver_manager.microsoft import EdgeChromiumDriverManager
 MONGO_URI = os.getenv("MONGO_URI",
                       "mongodb+srv://newscrrawler:qwe123@crrawlercluster.eencizs.mongodb.net/?retryWrites=true&w=majority&appName=CrrawlerCluster")
 DB_NAME = "mydatabase"
-COLLECTION_NAME = "raw_read"
+COLLECTION_NAME = "read"
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://top.baidu.com/board?tab=realtime'
