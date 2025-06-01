@@ -180,7 +180,8 @@ jobs:
           
           # 生成性能报告
           echo "::notice::Crawler completed successfully in ${DURATION}s"
-          echo "::set-output name=duration::$DURATION"
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+
 
       # 7. 上传产物（优化组织和命名）
       - name: Upload artifacts
