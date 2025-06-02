@@ -255,7 +255,7 @@ if __name__ == "__main__":
     db_client = MongoDBClient()
 
     parser = ArgumentParser(description="新闻分析系统")
-    parser.add_argument("--batch-size", type=int, default=1, help="每批分析的文章数量")
+    parser.add_argument("--batch-size", type=int, default=3, help="每批分析的文章数量")
     parser.add_argument("--interval", type=int, default=30, help="持续分析间隔时间(分钟)")
     parser.add_argument("--max-workers", type=int, default=4, help="最大线程数")
     parser.add_argument("--single-run", action="store_true", help="单次运行模式")
