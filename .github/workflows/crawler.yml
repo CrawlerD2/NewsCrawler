@@ -2,7 +2,7 @@ name: Baidu Hot News Crawler
 
 on:
   schedule:
-    - cron: "0,30 * * * *"  # 每半小时运行一次（UTC时间）
+    - cron: "0 */6 * * *"  # 每6小时运行一次（UTC时间）
   workflow_dispatch:        # 允许手动触发
   push:
     branches: [ main ]     # main分支推送时触发测试
