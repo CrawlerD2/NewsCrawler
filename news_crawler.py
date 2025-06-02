@@ -184,7 +184,7 @@ def parse_hotsearch_data(data: Dict) -> List[Dict]:
     top_content = data["data"]["cards"][0].get("topContent", [])
 
     parsed_data = []
-    for idx, item in enumerate((top_content + hotsearch_list)[:3], 1):
+    for idx, item in enumerate((top_content + hotsearch_list)[:50], 1):
         search_url = item.get("url", "")
         if not search_url.startswith('http'):
             search_url = f"https://www.baidu.com/s?wd={item.get('word', '')}"
