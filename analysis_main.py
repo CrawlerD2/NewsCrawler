@@ -362,9 +362,41 @@ class MongoDBClient:
             logger.error(f"保存结果失败: {str(e)}")
             return False
 
+    # def move_article(self, article_id, result, success=True):
+    #     """
+    #     移动文章到成功或失败集合，删除原集合文章
+    #     """
+    #     try:
+    #         from bson import ObjectId
+    #         if not isinstance(article_id, ObjectId):
+    #             article_id = ObjectId(article_id)
+
+    #         succ_collection = os.getenv("ANALYZED_SUCC_COLLECTION", "analyzed_succ")
+    #         fail_collection = os.getenv("ANALYZED_FAIL_COLLECTION", "analyzed_fail")
+    #         raw_collection = self.raw_collection
+
+    #         target_collection = succ_collection if success else fail_collection
+
+    #         if "_id" in result:
+    #             del result["_id"]
+
+    #         result["analyzed"] = success
+    #         result["analyzed_at"] = datetime.utcnow()
+    #         result["original_id"] = article_id
+
+    #         self.db[target_collection].insert_one(result)
+    #         logger.info(f"文章 {article_id} 已移动到集合 {target_collection}")
+
+    #         self.db[raw_collection].delete_one({"_id": article_id})
+    #         logger.info(f"文章 {article_id} 已从原始集合 {raw_collection} 中删除")
+
+    #         return True
+    #     except Exception as e:
+    #         logger.error(f"移动文章失败: {e}")
+    #         return False
     def move_article(self, article_id, result, success=True):
         """
-        移动文章到成功或失败集合，删除原集合文章
+        将文章移到成功/失败集合，并保留原始所有字段，避免重复字段覆盖。
         """
         try:
             from bson import ObjectId
@@ -373,27 +405,41 @@ class MongoDBClient:
 
             succ_collection = os.getenv("ANALYZED_SUCC_COLLECTION", "analyzed_succ")
             fail_collection = os.getenv("ANALYZED_FAIL_COLLECTION", "analyzed_fail")
-            raw_collection = self.raw_collection
-
             target_collection = succ_collection if success else fail_collection
 
-            if "_id" in result:
-                del result["_id"]
+            # 获取原始文章所有字段
+            original_doc = self.db[self.raw_collection].find_one({"_id": article_id})
+            if not original_doc:
+                logger.error(f"未找到文章 {article_id}")
+                return False
 
-            result["analyzed"] = success
-            result["analyzed_at"] = datetime.utcnow()
-            result["original_id"] = article_id
+            # 去掉 _id，防止冲突
+            original_doc.pop("_id", None)
 
-            self.db[target_collection].insert_one(result)
+            # 过滤分析结果中已经存在于原始文章的字段，避免重复覆盖
+            result_filtered = {k: v for k, v in result.items() if k not in original_doc}
+
+            # 合并原始文章和过滤后的分析结果
+            merged_doc = {**original_doc, **result_filtered}
+
+            # 补充标记字段
+            merged_doc["analyzed"] = success
+            merged_doc["analyzed_at"] = datetime.utcnow()
+            merged_doc["original_id"] = article_id  # 保留原始 _id
+
+            # 写入目标集合
+            self.db[target_collection].insert_one(merged_doc)
             logger.info(f"文章 {article_id} 已移动到集合 {target_collection}")
 
-            self.db[raw_collection].delete_one({"_id": article_id})
-            logger.info(f"文章 {article_id} 已从原始集合 {raw_collection} 中删除")
+            # 删除原始文档
+            self.db[self.raw_collection].delete_one({"_id": article_id})
+            logger.info(f"文章 {article_id} 已从原始集合中删除")
 
             return True
         except Exception as e:
-            logger.error(f"移动文章失败: {e}")
+            logger.error(f"移动文章失败: {e}", exc_info=True)
             return False
+
 
 
 def clean_memory():
