@@ -333,7 +333,8 @@ class NewsAnalysisPipeline:
 
     def _get_sentiment_emoji(self, label: str, score: float) -> str:
         if "positive" in label:
-            return "😊" if score > 0.8 else "🙂"
+            return "非常积极" if score > 0.8 else "积极"
         elif "negative" in label:
-            return "😠" if score > 0.8 else "😞"
-        return "😐"
+            return "非常消极" if score > 0.8 else "消极"
+        return "中性"
+
