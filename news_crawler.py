@@ -207,11 +207,12 @@ def parse_hotsearch_data(data: Dict) -> List[Dict]:
             "source": "百度热搜",
             "crawl_time": datetime.now(),
             "created_at": datetime.now(),
-            "updated_at": datetime.now()
+            "updated_at": datetime.now(),
+            "tts": None  # 新增的tts字段，boolean类型，内容为空
         })
 
     # 处理普通热搜内容（数字排名）
-    for idx, item in enumerate(hotsearch_list[:3], 1):
+    for idx, item in enumerate(hotsearch_list[:2], 1):
         search_url = item.get("url", "")
         if not search_url.startswith('http'):
             search_url = f"https://www.baidu.com/s?wd={item.get('word', '')}"
@@ -232,7 +233,8 @@ def parse_hotsearch_data(data: Dict) -> List[Dict]:
             "source": "百度热搜",
             "crawl_time": datetime.now(),
             "created_at": datetime.now(),
-            "updated_at": datetime.now()
+            "updated_at": datetime.now(),
+            "tts": None  # 新增的tts字段，boolean类型，内容为空
         })
 
         time.sleep(2)
