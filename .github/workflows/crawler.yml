@@ -2,31 +2,29 @@ name: Baidu Hot News Crawler
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # 每6小时运行一次（UTC时间）
-  workflow_dispatch:        # 允许手动触发
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
   push:
-    branches: [ main ]     # main分支推送时触发测试
+    branches: [ main ]
 
 jobs:
   crawl:
-    runs-on: ubuntu-22.04   # 使用LTS版本确保稳定性
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
-    
+
     env:
-      TZ: Asia/Shanghai     # 设置时区为北京时间
-      PYTHONUNBUFFERED: 1   # 实时Python输出
-      MAX_RETRY: 3          # 最大重试次数
-      EDGE_DRIVER_URL: "https://msedgedriver.azureedge.net"  # WebDriver下载源
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: 1
+      MAX_RETRY: 3
+      EDGE_DRIVER_URL: "https://msedgedriver.azureedge.net"
 
     steps:
-      # 1. 检出代码（优化缓存）
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # 2. 设置Python环境
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
@@ -34,7 +32,6 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'requirements.txt'
 
-      # 3. 安装系统依赖
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
@@ -45,128 +42,107 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-      # 4. 安装Python依赖（带缓存）
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
           pip list
 
-      # 5. Edge浏览器与WebDriver安装（优化版）
+      # ➕ WebDriver 缓存：先检查是否存在对应版本缓存
+      - name: Cache Edge WebDriver
+        id: cache-edgedriver
+        uses: actions/cache@v3
+        with:
+          path: edgedriver_cache/
+          key: edgedriver-${{ env.EDGE_VERSION }}
+
       - name: Install Edge and WebDriver
         timeout-minutes: 10
         run: |
-          # 安装Edge浏览器（带重试和错误处理）
+          # 安装 Edge 浏览器
           echo "=== Installing Microsoft Edge ==="
           for i in $(seq 1 $MAX_RETRY); do
-            echo "Attempt $i/$MAX_RETRY: Installing Edge..."
-            
-            # 清理可能的残留
             sudo rm -f /usr/share/keyrings/microsoft-edge.gpg
             sudo rm -f /etc/apt/sources.list.d/microsoft-edge.list
-            
-            # 安装过程
             curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg >/dev/null
             echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
             sudo apt-get update -y
             sudo apt-get install -y microsoft-edge-stable
-            
-            # 验证安装
+
             if command -v microsoft-edge >/dev/null; then
-              echo "Edge installation successful"
               break
             else
-              echo "Edge installation failed, retrying..."
+              echo "Edge install failed, retrying..."
               sleep 30
               [ $i -eq $MAX_RETRY ] && exit 1
             fi
           done
 
-          # 获取精确版本号（4段式）
           EDGE_FULL_VERSION=$(microsoft-edge --version | awk '{print $3}')
           echo "EDGE_VERSION=${EDGE_FULL_VERSION%.*}" >> $GITHUB_ENV
           echo "Installed Edge version: $EDGE_FULL_VERSION"
 
-          # WebDriver下载（多版本回退机制）
-          echo "=== Installing WebDriver ==="
-          VERSION_PATTERNS=(
-            "$EDGE_FULL_VERSION"          # 完整版本号
-            "${EDGE_FULL_VERSION%.*}"     # 主版本号（3段）
-            "${EDGE_FULL_VERSION%.*.*}"   # 主版本号（2段）
-          )
+          # 缓存路径
+          mkdir -p edgedriver_cache
+          DRIVER_ZIP="edgedriver_cache/edgedriver_${EDGE_FULL_VERSION}.zip"
+          DRIVER_BIN="edgedriver_cache/msedgedriver"
 
-          for VERSION in "${VERSION_PATTERNS[@]}"; do
-            echo "Trying WebDriver version: $VERSION"
-            if wget -q --tries=3 --timeout=30 "$EDGE_DRIVER_URL/$VERSION/edgedriver_linux64.zip" -O edgedriver.zip; then
-              if unzip -tq edgedriver.zip >/dev/null 2>&1; then
-                echo "WebDriver download and validation successful for version $VERSION"
-                break
-              else
-                echo "Downloaded file is corrupted, trying next version..."
-                rm -f edgedriver.zip
+          if [ -f "$DRIVER_BIN" ]; then
+            echo "Using cached WebDriver."
+            sudo cp "$DRIVER_BIN" /usr/local/bin/msedgedriver
+            sudo chmod +x /usr/local/bin/msedgedriver
+          else
+            echo "No cached WebDriver. Downloading..."
+            VERSION_PATTERNS=(
+              "$EDGE_FULL_VERSION"
+              "${EDGE_FULL_VERSION%.*}"
+              "${EDGE_FULL_VERSION%.*.*}"
+            )
+            for VERSION in "${VERSION_PATTERNS[@]}"; do
+              echo "Trying WebDriver version: $VERSION"
+              if wget -q --tries=3 --timeout=30 "$EDGE_DRIVER_URL/$VERSION/edgedriver_linux64.zip" -O "$DRIVER_ZIP"; then
+                if unzip -tq "$DRIVER_ZIP" >/dev/null 2>&1; then
+                  unzip -q -o "$DRIVER_ZIP" -d edgedriver_cache
+                  cp edgedriver_cache/msedgedriver /usr/local/bin/
+                  chmod +x /usr/local/bin/msedgedriver
+                  break
+                else
+                  echo "Corrupted zip, retrying..."
+                  rm -f "$DRIVER_ZIP"
+                fi
               fi
-            else
-              echo "Download failed for version $VERSION"
-              rm -f edgedriver.zip
+            done
+
+            if ! command -v msedgedriver >/dev/null; then
+              echo "::error::WebDriver installation failed"
+              exit 1
             fi
-          done
-
-          # 检查是否下载成功
-          if [ ! -f edgedriver.zip ]; then
-            echo "::error::Failed to download WebDriver after multiple attempts"
-            exit 1
           fi
 
-          # 解压安装WebDriver
-          echo "Installing WebDriver..."
-          sudo unzip -q -o edgedriver.zip -d /usr/local/bin
-          sudo chmod +x /usr/local/bin/msedgedriver
-          rm -f edgedriver.zip
-
-          # 验证WebDriver安装
-          if ! command -v msedgedriver >/dev/null; then
-            echo "::error::WebDriver installation failed"
-            exit 1
-          fi
-
-          # 版本一致性检查
           DRIVER_VERSION=$(msedgedriver --version | awk '{print $2}')
           echo "WebDriver version: $DRIVER_VERSION"
           if [[ ! "$DRIVER_VERSION" =~ ^${EDGE_FULL_VERSION%.*} ]]; then
             echo "::warning::Version mismatch! Edge: $EDGE_FULL_VERSION | Driver: $DRIVER_VERSION"
           fi
 
-      # 6. 运行爬虫（增强监控和日志）
       - name: Run crawler with monitoring
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           HEADLESS: "true"
           PYTHONPATH: "${{ github.workspace }}"
         run: |
-          echo "=== Starting Crawler ==="
-          echo "Current directory: $(pwd)"
-          echo "Python path: $PYTHONPATH"
-          ls -la
-          
-          START_TIME=$(date +%s)
-          
-          # 创建日志目录
           mkdir -p logs
           LOG_FILE="logs/crawler_$(date +'%Y%m%d_%H%M%S').log"
-          
-          # 带超时运行并记录日志
-          echo "Running crawler with 25 minutes timeout..."
+          START_TIME=$(date +%s)
           timeout 25m python -u news_crawler.py 2>&1 | tee $LOG_FILE
-          
-          # 错误分析
           EXIT_CODE=${PIPESTATUS[0]}
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
-          
+
           echo "=== Crawler Finished ==="
           echo "Exit code: $EXIT_CODE"
           echo "Duration: ${DURATION}s"
-          
+
           if [ $EXIT_CODE -eq 124 ]; then
             echo "::error::Crawler timed out after 25 minutes"
             exit 1
@@ -177,13 +153,10 @@ jobs:
             echo "::error::Crawler failed with exit code $EXIT_CODE"
             exit $EXIT_CODE
           fi
-          
-          # 生成性能报告
+
           echo "::notice::Crawler completed successfully in ${DURATION}s"
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
 
-
-      # 7. 上传产物（优化组织和命名）
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -195,7 +168,6 @@ jobs:
           retention-days: 7
           compression-level: 9
 
-      # 8. 状态通知（Slack可选）
       - name: Notify Slack on failure
         if: failure()
         uses: slackapi/slack-github-action@v1.24.0
