@@ -672,6 +672,9 @@
 # if __name__ == "__main__":
 #     main()
 
+
+
+
 import os
 import re
 import time
@@ -688,20 +691,18 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from readability import Document
-from tenacity import retry, stop_after_attempt, wait_exponential
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 # Configuration
 MONGO_URI = os.getenv("MONGO_URI",
-                      "mongodb+srv://newscrrawler:qwe123@crrawlercluster.eencizs.mongodb.net/?retryWrites=true&w=majority&appName=CrrawlerCluster")
+                     "mongodb+srv://newscrrawler:qwe123@crrawlercluster.eencizs.mongodb.net/?retryWrites=true&w=majority&appName=CrrawlerCluster")
 DB_NAME = "mydatabase"
 COLLECTION_READ = "read"
 COLLECTION_SUCC = "analyzed_succ"
 COLLECTION_FAIL = "analyzed_fail"
 
-# Request headers
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
     'Referer': 'https://top.baidu.com/board?tab=realtime'
@@ -716,49 +717,34 @@ logging.basicConfig(
     ]
 )
 
-def check_internet() -> bool:
-    """Check internet connection"""
+def setup_driver() -> Optional[webdriver.Edge]:
+    """Setup and return WebDriver instance with GitHub Actions compatibility"""
     try:
-        requests.get("http://www.baidu.com", timeout=5)
-        return True
-    except Exception:
-        logging.error("Internet connection check failed")
-        return False
+        options = Options()
+        
+        # GitHub Actions specific settings
+        if os.getenv('GITHUB_ACTIONS') == 'true':
+            options.add_argument("--headless=new")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--remote-debugging-port=9222")
+        else:
+            options.add_argument("--headless")
+        
+        options.add_argument(f"user-agent={HEADERS['User-Agent']}")
+        
+        # Anti-detection
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def get_baidu_hotsearch_data() -> Optional[Dict]:
-    """Fetch Baidu hot search data with retry mechanism"""
-    api_url = "https://top.baidu.com/api/board?tab=realtime"
-    try:
-        response = requests.get(api_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logging.error(f"Failed to fetch hot search data: {e}")
-        raise
-
-def setup_driver() -> webdriver.Edge:
-    """Setup and return WebDriver instance with enhanced anti-detection"""
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"user-agent={HEADERS['User-Agent']}")
-
-    try:
-        # Use EdgeChromiumDriverManager to handle driver installation
+        # Use webdriver_manager to handle driver installation
         driver_path = EdgeChromiumDriverManager().install()
         service = Service(driver_path)
         driver = webdriver.Edge(service=service, options=options)
 
-        # Enhanced anti-detection
-        driver.execute_cdp_cmd("Network.setUserAgentOverride", {
-            "userAgent": HEADERS['User-Agent']
-        })
+        # Additional anti-detection measures
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -766,42 +752,62 @@ def setup_driver() -> webdriver.Edge:
                 window.chrome = {runtime: {}};
             """
         })
-        logging.info("Edge WebDriver initialized successfully")
+        
         return driver
     except Exception as e:
         logging.error(f"Failed to initialize WebDriver: {e}")
-        raise
+        return None
+
+def get_baidu_hotsearch_data() -> Optional[Dict]:
+    """Fetch Baidu hot search data with retry mechanism"""
+    api_url = "https://top.baidu.com/api/board?tab=realtime"
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(api_url, headers=HEADERS, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logging.error(f"Failed to fetch hot search data after {max_retries} attempts: {e}")
+                return None
+            time.sleep(2 ** attempt)  # Exponential backoff
 
 def is_valid_webpage_link(href: str) -> bool:
     """Check if a link is a valid external webpage"""
-    if not href:
+    if not href or not href.startswith('http'):
         return False
-    invalid_prefixes = [
-        "https://tieba.baidu.com",
-        "https://zhidao.baidu.com",
-        "https://baike.baidu.com",
-        "https://v.baidu.com",
-        "https://sp.baidu.com",
-        "https://image.baidu.com",
-        "https://video.baidu.com",
-        "https://wenku.baidu.com",
-        "https://map.baidu.com",
-        "https://events.baidu.com",
-        "https://new.baidu.com",
-        "https://voice.baidu.com",
+        
+    invalid_domains = [
+        "tieba.baidu.com",
+        "zhidao.baidu.com",
+        "baike.baidu.com",
+        "v.baidu.com",
+        "sp.baidu.com",
+        "image.baidu.com",
+        "video.baidu.com",
+        "wenku.baidu.com",
+        "map.baidu.com",
+        "events.baidu.com",
+        "new.baidu.com",
+        "voice.baidu.com",
     ]
-    return not any(href.startswith(prefix) for prefix in invalid_prefixes)
+    
+    return not any(domain in href for domain in invalid_domains)
 
-def wait_for_page_load(driver: webdriver.Edge, timeout: int = 15) -> None:
+def wait_for_page_load(driver: webdriver.Edge, timeout: int = 15) -> bool:
     """Wait for page to load completely"""
     try:
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
-    except TimeoutException as e:
-        logging.warning(f"Page load timeout: {e}")
+        return True
+    except TimeoutException:
+        logging.warning("Page load timed out")
+        return False
 
-def scroll_to_bottom(driver: webdriver.Edge, scroll_pause_time: float = 1.0, max_scrolls: int = 5) -> None:
+def scroll_to_bottom(driver: webdriver.Edge, scroll_pause_time: float = 1.0, max_scrolls: int = 3) -> None:
     """Scroll to bottom of page to load lazy content"""
     last_height = driver.execute_script("return document.body.scrollHeight")
     for _ in range(max_scrolls):
@@ -812,119 +818,168 @@ def scroll_to_bottom(driver: webdriver.Edge, scroll_pause_time: float = 1.0, max
             break
         last_height = new_height
 
+def clean_content(text: str) -> str:
+    """Clean extracted content"""
+    if not text:
+        return ""
+    
+    # Remove excessive whitespace and newlines
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    return text
+
 def extract_content_from_html(html: str) -> Tuple[str, str]:
-    """Extract title and content from HTML with better cleaning"""
+    """Extract title and content from HTML with improved cleaning"""
     try:
         doc = Document(html)
-        title = doc.title()
+        title = doc.title() or "No title found"
+        
+        # Get summary and clean it
         summary_html = doc.summary()
-
         soup = BeautifulSoup(summary_html, "html.parser")
-        for script in soup(["script", "style", "iframe", "noscript"]):
-            script.decompose()
-
+        
+        # Remove unwanted elements
+        for element in soup(["script", "style", "iframe", "noscript", "nav", "footer", "aside"]):
+            element.decompose()
+            
+        # Get text and clean it
         content = soup.get_text(separator="\n", strip=True)
-        content = re.sub(r'\n{3,}', '\n\n', content)
+        content = clean_content(content)
+        
         return title, content
     except Exception as e:
         logging.error(f"Content extraction failed: {e}")
         return "Failed to extract title", "Failed to extract content"
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10))
 def get_first_valid_url(driver: webdriver.Edge, search_url: str) -> Optional[str]:
-    """Find first valid URL from search results with multiple selector strategies"""
+    """Find first valid URL from search results with multiple strategies"""
     try:
         driver.get(search_url)
-        wait_for_page_load(driver)
-
+        if not wait_for_page_load(driver):
+            return None
+            
         # Try multiple selectors to find valid links
-        selectors = ['div.c-container a', 'div.result a', 'h3 a']
+        selectors = [
+            'div.c-container a[href]',  # Baidu desktop results
+            'div.result a[href]',       # Alternative Baidu results
+            'h3 a[href]',               # Common heading links
+            'a[href]'                   # Fallback to any link
+        ]
+        
         for selector in selectors:
             try:
-                links = WebDriverWait(driver, 5).until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
-
+                links = driver.find_elements(By.CSS_SELECTOR, selector)
                 for link in links:
                     try:
                         href = link.get_attribute('href')
                         if href and is_valid_webpage_link(href):
-                            logging.info(f"Found valid link: {href[:50]}...")
+                            logging.info(f"Found valid link: {href[:80]}...")
                             return href
-                    except Exception as e:
-                        logging.debug(f"Link processing failed: {e}")
+                    except Exception:
                         continue
-            except TimeoutException:
-                logging.debug(f"Selector '{selector}' timed out")
+            except Exception:
                 continue
-            except Exception as e:
-                logging.debug(f"Selector '{selector}' failed: {e}")
-                continue
-
+                
         logging.warning("No valid links found with any selector")
         return None
     except Exception as e:
-        logging.error(f"Failed to get valid URL: {str(e)}")
-        raise
+        logging.error(f"Failed to get valid URL: {e}")
+        return None
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10))
-def get_news_detail(search_url: str, driver: webdriver.Edge) -> Tuple[str, str]:
-    """Get news details with retry mechanism"""
+def get_news_detail(driver: webdriver.Edge, search_url: str) -> Tuple[str, str]:
+    """Get news details with improved error handling"""
     try:
         first_valid_url = get_first_valid_url(driver, search_url)
         if not first_valid_url:
-            logging.warning(f"No valid link found for: {search_url}")
             return "No valid link found", "No valid link found"
 
         driver.get(first_valid_url)
-        wait_for_page_load(driver)
+        if not wait_for_page_load(driver):
+            return "Page load failed", "Page load failed"
+            
         scroll_to_bottom(driver)
         return extract_content_from_html(driver.page_source)
     except Exception as e:
-        logging.error(f"Failed to get news details: {str(e)[:200]}")
-        raise
+        logging.error(f"Failed to get news details: {e}")
+        return "Failed to fetch", "Failed to fetch"
 
 def parse_hotsearch_data(data: Dict, driver: webdriver.Edge) -> List[Dict]:
-    """Parse hot search data with improved error handling"""
+    """Parse hot search data with ranking information"""
     if not data or "data" not in data or "cards" not in data["data"]:
         return []
 
-    parsed_data = []
-    hot_items = data["data"]["cards"][0].get("content", [])[:10]
-    top_items = data["data"]["cards"][0].get("topContent", [])
+    try:
+        hotsearch_list = data["data"]["cards"][0].get("content", [])[:20]  # Limit to top 20
+        top_content = data["data"]["cards"][0].get("topContent", [])
+        parsed_data = []
 
-    for item in top_items + hot_items:
-        try:
-            search_url = item.get("url", f"https://www.baidu.com/s?wd={item.get('word', '')}")
-            is_top = "Yes" if item in top_items else "No"
-            ranking = "Top" if is_top == "Yes" else str(hot_items.index(item) + 1 if item in hot_items else "N/A")
+        # Process top content (marked as "Top")
+        for item in top_content:
+            try:
+                search_url = item.get("url", f"https://www.baidu.com/s?wd={item.get('word', '')}")
+                logging.info(f"Processing top hot search: {item.get('word', '')}")
+                
+                news_title, news_content = get_news_detail(driver, search_url)
+                
+                parsed_data.append({
+                    "ranking": "Top",
+                    "hotsearch_title": item.get("word", ""),
+                    "hotsearch_url": search_url,
+                    "hot_index": item.get("hotScore", ""),
+                    "hotsearch_desc": item.get("desc", ""),
+                    "image_url": item.get("img", ""),
+                    "is_top": True,
+                    "news_title": news_title,
+                    "news_content": news_content[:100000],  # Limit content size
+                    "source": "Baidu Hot Search",
+                    "created_at": datetime.now(),
+                    "updated_at": datetime.now(),
+                    "tts": None,
+                    "status": "processed",
+                    "broadcasted": False,
+                    "processed_at": datetime.now()
+                })
+            except Exception as e:
+                logging.error(f"Failed to process top content item: {e}")
+                continue
 
-            logging.info(f"Processing hot search {ranking}: {item.get('word', '')}")
-            news_title, news_content = get_news_detail(search_url, driver)
+        # Process regular hot search content (numbered ranking)
+        for idx, item in enumerate(hotsearch_list, 1):
+            try:
+                search_url = item.get("url", f"https://www.baidu.com/s?wd={item.get('word', '')}")
+                logging.info(f"Processing hot search #{idx}: {item.get('word', '')}")
+                
+                news_title, news_content = get_news_detail(driver, search_url)
+                
+                parsed_data.append({
+                    "ranking": str(idx),
+                    "hotsearch_title": item.get("word", ""),
+                    "hotsearch_url": search_url,
+                    "hot_index": item.get("hotScore", ""),
+                    "hotsearch_desc": item.get("desc", ""),
+                    "image_url": item.get("img", ""),
+                    "is_top": False,
+                    "news_title": news_title,
+                    "news_content": news_content[:100000],  # Limit content size
+                    "source": "Baidu Hot Search",
+                    "created_at": datetime.now(),
+                    "updated_at": datetime.now(),
+                    "tts": None,
+                    "status": "processed",
+                    "broadcasted": False,
+                    "processed_at": datetime.now()
+                })
+                
+                time.sleep(1)  # Be polite with delays
+            except Exception as e:
+                logging.error(f"Failed to process hot search item #{idx}: {e}")
+                continue
 
-            parsed_data.append({
-                "ranking": ranking,
-                "hotsearch_title": item.get("word", ""),
-                "hotsearch_url": search_url,
-                "hot_index": item.get("hotScore", ""),
-                "hotsearch_desc": item.get("desc", ""),
-                "image_url": item.get("img", ""),
-                "is_top": is_top,
-                "news_title": news_title,
-                "news_content": news_content[:100000],
-                "source": "Baidu Hot Search",
-                "created_at": datetime.now(),
-                "updated_at": datetime.now(),
-                "tts": None,
-                "status": "processed",
-                "broadcasted": False,
-                "processed_at": datetime.now()
-            })
-            time.sleep(1)  # Be polite with delays
-        except Exception as e:
-            logging.error(f"Failed to process hot search item: {e}")
-            continue
-
-    return parsed_data
+        return parsed_data
+    except Exception as e:
+        logging.error(f"Failed to parse hot search data: {e}")
+        return []
 
 def connect_to_mongodb():
     """Connect to MongoDB with timeout settings"""
@@ -935,9 +990,8 @@ def connect_to_mongodb():
             socketTimeoutMS=5000,
             serverSelectionTimeoutMS=5000
         )
-        client.admin.command('ping')
+        client.admin.command('ping')  # Test connection
         db = client[DB_NAME]
-        logging.info("Connected to MongoDB successfully")
         return client, db[COLLECTION_READ], db[COLLECTION_SUCC], db[COLLECTION_FAIL]
     except Exception as e:
         logging.error(f"Failed to connect to MongoDB: {e}")
@@ -949,23 +1003,21 @@ def filter_new_data(data: List[Dict], collections: List) -> List[Dict]:
     for col in collections:
         if col is not None:
             try:
-                existing_urls.update(item.get("hotsearch_url") for item in col.find({}, {"hotsearch_url": 1, "_id": 0}))
+                urls = col.distinct("hotsearch_url")
+                existing_urls.update(urls)
             except Exception as e:
-                logging.error(f"Failed to get URLs from collection: {e}")
+                logging.error(f"Error fetching URLs from collection: {e}")
 
-    filtered = [item for item in data if item.get("hotsearch_url") not in existing_urls]
-    logging.info(f"Filtered {len(data) - len(filtered)} duplicates, {len(filtered)} new items remain")
-    return filtered
+    return [item for item in data if item.get("hotsearch_url") not in existing_urls]
 
 def save_to_mongodb(data: List[Dict], collection) -> bool:
     """Save data to MongoDB with error handling"""
-    if collection is None or not data:
-        logging.error("Invalid collection or empty data")
+    if not collection or not data:
         return False
 
     try:
-        result = collection.insert_many(data, ordered=False)
-        logging.info(f"Successfully inserted {len(result.inserted_ids)} documents")
+        result = collection.insert_many(data, ordered=False)  # Continue on error
+        logging.info(f"Inserted {len(result.inserted_ids)} documents")
         return True
     except Exception as e:
         logging.error(f"Failed to save to MongoDB: {e}")
@@ -973,32 +1025,49 @@ def save_to_mongodb(data: List[Dict], collection) -> bool:
 
 def main():
     """Main execution function with proper resource cleanup"""
-    if not check_internet():
-        return
-
     driver, client = None, None
     try:
         driver = setup_driver()
+        if not driver:
+            return
+            
         client, read_col, succ_col, fail_col = connect_to_mongodb()
         if not client:
             return
 
         logging.info("Fetching Baidu hot search data...")
-        if hotsearch_data := get_baidu_hotsearch_data():
-            parsed_data = parse_hotsearch_data(hotsearch_data, driver)
-            new_data = filter_new_data(parsed_data, [read_col, succ_col, fail_col])
-            if new_data and save_to_mongodb(new_data, read_col):
-                logging.info("Data saved successfully")
+        hotsearch_data = get_baidu_hotsearch_data()
+        if not hotsearch_data:
+            return
+
+        logging.info("Parsing hot search data...")
+        parsed_data = parse_hotsearch_data(hotsearch_data, driver)
+        if not parsed_data:
+            return
+
+        # Filter duplicates
+        new_data = filter_new_data(parsed_data, [read_col, succ_col, fail_col])
+        if not new_data:
+            logging.info("No new data to insert")
+            return
+
+        # Save to MongoDB
+        if save_to_mongodb(new_data, read_col):
+            logging.info("Data saved successfully")
     except Exception as e:
         logging.error(f"Main execution failed: {e}")
     finally:
-        if driver:
-            driver.quit()
-            logging.info("WebDriver closed")
-        if client:
-            client.close()
-            logging.info("MongoDB connection closed")
+        try:
+            if driver:
+                driver.quit()
+        except Exception as e:
+            logging.error(f"Failed to quit driver: {e}")
+            
+        try:
+            if client:
+                client.close()
+        except Exception as e:
+            logging.error(f"Failed to close MongoDB connection: {e}")
 
 if __name__ == "__main__":
     main()
-
