@@ -333,7 +333,6 @@
 #     main()
 
 
-
 import os
 import re
 import time
@@ -369,42 +368,68 @@ HEADERS = {
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 def get_baidu_hotsearch_data() -> Optional[Dict]:
     """Fetch Baidu hot search data"""
     api_url = "https://top.baidu.com/api/board?tab=realtime"
     try:
-        response = requests.get(api_url, headers=HEADERS)
+        response = requests.get(api_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         logging.error(f"Failed to fetch hot search data: {e}")
         return None
 
-
 def setup_driver() -> webdriver.Edge:
-    """Setup and return WebDriver instance"""
+    """Setup and return WebDriver instance optimized for GitHub Actions"""
     options = Options()
+    
+    # Common options
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--remote-debugging-port=9222")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--window-size=1920,1080")
+    
+    # User agent and language settings
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.add_argument("--lang=en-US,en")
 
-    driver_path = EdgeChromiumDriverManager().install()
-    service = Service(driver_path)
-    driver = webdriver.Edge(service=service, options=options)
-
-    # Anti-detection
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-        """
-    })
-    return driver
-
+    # Additional options for GitHub Actions
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--disable-logging")
+        options.add_argument("--log-level=3")
+        options.add_argument("--silent")
+        options.add_argument("--disable-crash-reporter")
+    
+    try:
+        # Use webdriver_manager to handle driver installation
+        driver_path = EdgeChromiumDriverManager().install()
+        service = Service(driver_path)
+        
+        # Configure service for GitHub Actions
+        if os.getenv('GITHUB_ACTIONS') == 'true':
+            service.creation_flags = 0x80000000  # CREATE_NO_WINDOW flag
+        
+        driver = webdriver.Edge(service=service, options=options)
+        
+        # Anti-detection measures
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                window.navigator.chrome = {runtime: {}, etc: {}};
+            """
+        })
+        
+        return driver
+    except Exception as e:
+        logging.error(f"Failed to setup WebDriver: {e}")
+        raise
 
 def is_valid_webpage_link(href: str) -> bool:
     """Check if a link is a valid external webpage"""
@@ -424,21 +449,19 @@ def is_valid_webpage_link(href: str) -> bool:
         "https://new.baidu.com",
         "https://voice.baidu.com",
     ]
-    return not any(href.startswith(prefix) for prefix in invalid_prefixes)
+    return href.startswith('http') and not any(href.startswith(prefix) for prefix in invalid_prefixes)
 
-
-def wait_for_page_load(driver: webdriver.Edge, timeout: int = 10) -> None:
-    """Wait for page to load"""
+def wait_for_page_load(driver: webdriver.Edge, timeout: int = 15) -> None:
+    """Wait for page to load with extended timeout for GitHub Actions"""
     try:
         WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
+            lambda d: d.execute_script('return document.readyState') == 'complete'
         )
     except Exception as e:
         logging.warning(f"Page load timeout: {e}")
 
-
-def scroll_to_bottom(driver: webdriver.Edge, scroll_pause_time: float = 1.0, max_scrolls: int = 10) -> None:
-    """Scroll to bottom of page to load lazy content"""
+def scroll_to_bottom(driver: webdriver.Edge, scroll_pause_time: float = 1.5, max_scrolls: int = 5) -> None:
+    """Scroll to bottom of page to load lazy content with adjusted parameters"""
     last_height = driver.execute_script("return document.body.scrollHeight")
     for _ in range(max_scrolls):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -448,67 +471,109 @@ def scroll_to_bottom(driver: webdriver.Edge, scroll_pause_time: float = 1.0, max
             break
         last_height = new_height
 
-
 def extract_content_from_html(html: str) -> Tuple[str, str]:
-    """Extract title and content from HTML using readability"""
-    doc = Document(html)
-    title = doc.title()
-    summary_html = doc.summary()
-
-    soup = BeautifulSoup(summary_html, "html.parser")
-    content = soup.get_text(separator="\n", strip=True)
-
-    return title, content
-
+    """Extract title and content from HTML using readability with error handling"""
+    try:
+        doc = Document(html)
+        title = doc.title() or "No title found"
+        
+        summary_html = doc.summary()
+        soup = BeautifulSoup(summary_html, "html.parser")
+        
+        # Remove unwanted elements
+        for element in soup(['script', 'style', 'iframe', 'nav', 'footer', 'aside']):
+            element.decompose()
+            
+        content = soup.get_text(separator="\n", strip=True)
+        content = re.sub(r'\n{3,}', '\n\n', content)  # Reduce excessive newlines
+        
+        return title, content[:100000]  # Directly truncate here
+    except Exception as e:
+        logging.error(f"Error extracting content: {e}")
+        return "Failed to extract title", "Failed to extract content"
 
 def get_first_valid_url(driver: webdriver.Edge, search_url: str) -> Optional[str]:
-    """Find first valid URL from search results"""
-    driver.get(search_url)
-    wait_for_page_load(driver)
-    time.sleep(3)
-
+    """Find first valid URL from search results with improved reliability"""
     try:
-        web_tab = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[data-index="0"]')))
-        web_tab.click()
-        time.sleep(3)
-    except Exception:
-        pass
+        driver.get(search_url)
+        wait_for_page_load(driver)
+        time.sleep(3)  # Additional wait for search results to load
 
-    containers = driver.find_elements(By.CSS_SELECTOR, 'div.c-container, div.result')
-    for container in containers:
+        # Try to click the "Web" tab if available
         try:
-            a = container.find_element(By.CSS_SELECTOR, 'a[href]')
-            href = a.get_attribute('href')
-            if is_valid_webpage_link(href):
-                return href
+            web_tab = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'a[data-index="0"]')))
+            driver.execute_script("arguments[0].click();", web_tab)
+            time.sleep(2)
         except Exception:
-            continue
-    return None
+            pass  # Continue if web tab not found
 
+        # Find all possible result containers
+        containers = driver.find_elements(By.CSS_SELECTOR, 
+            'div.c-container, div.result, div.result-op, div[mu]')
+        
+        for container in containers:
+            try:
+                # Find all links in container and check them
+                links = container.find_elements(By.CSS_SELECTOR, 'a[href]')
+                for link in links:
+                    href = link.get_attribute('href')
+                    if href and is_valid_webpage_link(href):
+                        logging.info(f"Found valid URL: {href}")
+                        return href
+            except Exception:
+                continue
+        
+        logging.warning("No valid external links found in search results")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Error finding valid URL: {e}")
+        return None
 
 def get_news_detail(search_url: str) -> Tuple[str, str]:
-    """Get news details (title and content) from a search URL"""
+    """Get news details with improved error handling and retry logic"""
     driver = None
-    try:
-        driver = setup_driver()
-        first_valid_url = get_first_valid_url(driver, search_url)
+    retry_count = 2  # Number of retry attempts
+    
+    for attempt in range(retry_count):
+        try:
+            driver = setup_driver()
+            first_valid_url = get_first_valid_url(driver, search_url)
 
-        if not first_valid_url:
-            return "No valid link found", "No valid link found"
+            if not first_valid_url:
+                return "No valid link found", "No valid link found"
 
-        driver.get(first_valid_url)
-        wait_for_page_load(driver)
-        scroll_to_bottom(driver)
+            logging.info(f"Attempting to fetch content from: {first_valid_url}")
+            driver.get(first_valid_url)
+            wait_for_page_load(driver)
+            
+            # Additional wait for dynamic content
+            time.sleep(3)
+            scroll_to_bottom(driver)
+            
+            # Final wait after scrolling
+            time.sleep(2)
+            
+            html = driver.page_source
+            if not html or len(html) < 500:  # Simple check for valid HTML
+                raise ValueError("Page source too short, likely loading failed")
+                
+            return extract_content_from_html(html)
+            
+        except Exception as e:
+            logging.warning(f"Attempt {attempt + 1} failed: {str(e)[:200]}")
+            if driver:
+                driver.quit()
+                driver = None
+            if attempt == retry_count - 1:  # Last attempt
+                return "Failed to fetch", f"Failed to fetch after {retry_count} attempts"
+            time.sleep(5)  # Wait before retry
+        finally:
+            if driver:
+                driver.quit()
 
-        html = driver.page_source
-        return extract_content_from_html(html)
-    except Exception as e:
-        logging.error(f"Failed to get news details: {str(e)[:200]}")
-        return "Failed to fetch", "Failed to fetch"
-    finally:
-        if driver:
-            driver.quit()
+# [Rest of the functions remain the same as they're not related to the scraping issue]
 
 
 def parse_hotsearch_data(data: Dict) -> List[Dict]:
