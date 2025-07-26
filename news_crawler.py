@@ -1259,23 +1259,17 @@ def setup_driver() -> webdriver.Edge:
         FileNotFoundError: If Edge driver is not found
         WebDriverException: If WebDriver initialization fails
     """
-    # ==================== 1. 浏览器选项配置 ====================
+    # ==================== 1. 初始化浏览器选项 ====================
     options = Options()
 
-    # 无头模式配置
-    options.add_argument("--headless=new")
-
-    # 性能优化参数
+    # 基础配置
+    options.add_argument("--headless=new")  # 新版无头模式
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
-    # 调试与自动化参数
-    options.add_argument("--remote-debugging-port=9222")
-    options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--window-size=1920,1080")
 
-    # 用户代理和语言设置
+    # 用户代理配置
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1283,28 +1277,39 @@ def setup_driver() -> webdriver.Edge:
     )
     options.add_argument("--lang=en-US,en")
 
-    # ==================== 2. GitHub Actions专用配置 ====================
-    if os.getenv('GITHUB_ACTIONS') == 'true':
+    # ==================== 2. CI环境特殊配置 ====================
+    if os.getenv('CI') or os.getenv('GITHUB_ACTIONS'):
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-software-rasterizer")
         options.add_argument("--single-process")
+        options.add_argument("--log-level=3")
 
-    # ==================== 3. 驱动路径配置 ====================
+    # ==================== 3. 驱动路径处理 ====================
+    # 定义可能的驱动路径（按优先级排序）
+    possible_paths = [
+        "/usr/local/bin/msedgedriver",  # CI环境标准路径
+        os.path.join(os.path.dirname(__file__), "drivers", "msedgedriver"),  # 本地开发路径
+        "msedgedriver"  # 系统PATH中的驱动
+    ]
+
+    driver_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            driver_path = path
+            break
+
+    if not driver_path:
+        raise FileNotFoundError(
+            "无法找到Edge WebDriver。请确保：\n"
+            "1. GitHub Actions用户：YAML工作流已正确安装驱动到/usr/local/bin/\n"
+            "2. 本地开发用户：已将msedgedriver放入项目drivers/目录或系统PATH\n"
+            "下载地址：https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/"
+        )
+
+    logging.info(f"使用Edge驱动路径: {driver_path}")
+
+    # ==================== 4. 服务配置 ====================
     try:
-        # 直接使用系统路径（与YAML安装位置一致）
-        driver_path = "/usr/local/bin/msedgedriver"
-
-        # 验证驱动是否存在
-        if not os.path.exists(driver_path):
-            raise FileNotFoundError(
-                f"Edge驱动未找到: {driver_path}\n"
-                "GitHub Actions用户请确保YAML已安装驱动到/usr/local/bin/\n"
-                "本地用户请下载驱动并设置正确路径"
-            )
-
-        logging.info(f"使用Edge驱动路径: {driver_path}")
-
-        # ==================== 4. 服务配置 ====================
         service = Service(
             executable_path=driver_path,
             service_args=['--verbose'] if logging.getLogger().level == logging.DEBUG else None
@@ -1314,30 +1319,44 @@ def setup_driver() -> webdriver.Edge:
         driver = webdriver.Edge(
             service=service,
             options=options,
-            service_executor_timeout=30,
-            keep_alive=True
+            service_executor_timeout=30,  # 服务启动超时30秒
+            keep_alive=True  # 保持长连接
         )
 
-        # ==================== 6. 反检测措施 ====================
+        # ==================== 6. 反自动化检测配置 ====================
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
+                    get: () => undefined,
+                    configurable: true
                 });
                 Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
+                    get: () => ['en-US', 'en'],
+                    configurable: true
                 });
                 window.navigator.chrome = {
                     runtime: {},
                     loadTimes: () => {},
-                    csi: () => {}
+                    csi: () => {},
+                    app: {
+                        isInstalled: false,
+                        InstallState: 'disabled',
+                        RunningState: 'stopped'
+                    }
                 };
             """
         })
 
-        # 设置超时
-        driver.set_page_load_timeout(30)
-        driver.set_script_timeout(20)
+        # ==================== 7. 超时设置 ====================
+        driver.set_page_load_timeout(25)  # 页面加载超时25秒
+        driver.set_script_timeout(15)  # 脚本执行超时15秒
+
+        # 验证版本
+        browser_version = subprocess.getoutput("microsoft-edge --version").split()[2]
+        driver_version = subprocess.getoutput(f"{driver_path} --version").split()[2]
+
+        if browser_version != driver_version:
+            logging.warning(f"版本不匹配警告: 浏览器({browser_version}) ≠ 驱动({driver_version})")
 
         return driver
 
