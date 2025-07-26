@@ -430,12 +430,11 @@
 #           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 
-
 name: Baidu Hot News Crawler
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # 每6小时运行一次
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -478,16 +477,17 @@ jobs:
           pip install --no-cache-dir -r requirements.txt
           pip list
 
-      - name: Install Microsoft Edge
+      - name: Install Edge and Driver
         run: |
           # 安装Edge浏览器
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg >/dev/null
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
           sudo apt-get update -y
-          sudo apt-get install -y microsoft-edge-stable
+          sudo apt-get install -y microsoft-edge-stable || true  # 忽略安装错误
 
-          # 自动下载匹配版本的WebDriver
+          # 获取浏览器版本并下载匹配驱动
           EDGE_VERSION=$(microsoft-edge --version | awk '{print $3}')
+          echo "安装匹配的WebDriver版本: $EDGE_VERSION"
           wget -q "https://msedgedriver.azureedge.net/$EDGE_VERSION/edgedriver_linux64.zip"
           unzip -o edgedriver_linux64.zip
           sudo mv msedgedriver /usr/local/bin/
@@ -500,56 +500,35 @@ jobs:
           echo "驱动路径: $(which msedgedriver)"
           echo "文件权限: $(ls -la /usr/local/bin/msedgedriver)"
 
-      - name: Run crawler with monitoring
+      - name: Create logs directory
+        run: mkdir -p logs
+
+      - name: Run crawler
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           HEADLESS: "true"
           PYTHONPATH: "${{ github.workspace }}"
         run: |
-          mkdir -p logs
           LOG_FILE="logs/crawler_$(date +'%Y%m%d_%H%M%S').log"
-          START_TIME=$(date +%s)
+          echo "=== 开始执行爬虫 ===" | tee $LOG_FILE
+          echo "Python版本: $(python --version)" | tee -a $LOG_FILE
+          echo "Edge路径: $(which microsoft-edge)" | tee -a $LOG_FILE
+          echo "Driver路径: $(which msedgedriver)" | tee -a $LOG_FILE
           
-          # 添加调试信息
-          echo "=== 系统信息 ==="
-          echo "当前目录: $(pwd)"
-          echo "Python路径: $(which python)"
-          echo "Edge路径: $(which microsoft-edge)"
-          echo "Driver路径: $(which msedgedriver)"
-          
-          timeout 25m python -u news_crawler.py 2>&1 | tee $LOG_FILE
+          timeout 25m python -u news_crawler.py 2>&1 | tee -a $LOG_FILE
           EXIT_CODE=${PIPESTATUS[0]}
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
+          
+          echo "=== 爬虫执行结束 ===" | tee -a $LOG_FILE
+          echo "退出码: $EXIT_CODE" | tee -a $LOG_FILE
+          exit $EXIT_CODE
 
-          echo "=== 爬虫执行结果 ==="
-          echo "退出码: $EXIT_CODE"
-          echo "耗时: ${DURATION}s"
-
-          if [ $EXIT_CODE -eq 124 ]; then
-            echo "::error::爬虫执行超时(25分钟)"
-            exit 1
-          elif [ $EXIT_CODE -ne 0 ]; then
-            echo "::group::错误详情(最后100行)"
-            tail -n 100 $LOG_FILE
-            echo "::endgroup::"
-            echo "::error::爬虫执行失败，退出码: $EXIT_CODE"
-            exit $EXIT_CODE
-          fi
-
-          echo "::notice::爬虫执行成功，耗时: ${DURATION}s"
-          echo "duration=$DURATION" >> $GITHUB_OUTPUT
-
-      - name: Upload artifacts
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crawler-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            logs/
-            !*.tmp
+          name: crawler-logs-${{ github.run_id }}
+          path: logs/
           retention-days: 7
-          compression-level: 9
 
       - name: Notify Slack on failure
         if: failure()
