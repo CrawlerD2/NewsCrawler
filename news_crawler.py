@@ -783,11 +783,20 @@ def get_baidu_hotsearch_data() -> Optional[Dict]:
 
 
 def setup_driver() -> webdriver.Edge:
-    """Setup and return WebDriver instance optimized for GitHub Actions"""
+    """Setup and return a configured Edge WebDriver instance.
+
+    Returns:
+        webdriver.Edge: Configured Edge browser instance
+
+    Raises:
+        FileNotFoundError: If Edge driver is not found in drivers/ directory
+        WebDriverException: If WebDriver initialization fails
+    """
     options = Options()
 
-    # Common options
-    options.add_argument("--headless")
+    # ==================== 浏览器选项配置 ====================
+    # 无头模式和基础配置
+    options.add_argument("--headless=new")  # 新版Edge推荐使用"--headless=new"
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -795,43 +804,89 @@ def setup_driver() -> webdriver.Edge:
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--window-size=1920,1080")
 
-    # User agent and language settings
+    # 用户代理和语言设置
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"  # 注意这里改为Edge的User-Agent
+    )
     options.add_argument("--lang=en-US,en")
 
-    # Additional options for GitHub Actions
+    # GitHub Actions专用配置
     if os.getenv('GITHUB_ACTIONS') == 'true':
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-software-rasterizer")
         options.add_argument("--disable-logging")
         options.add_argument("--log-level=3")
-        options.add_argument("--silent")
-        options.add_argument("--disable-crash-reporter")
+        options.add_argument("--single-process")  # 单进程模式提升稳定性
 
     try:
-        # Use webdriver_manager to handle driver installation
-        driver_path = EdgeChromiumDriverManager().install()
-        service = Service(driver_path)
+        # ==================== 驱动路径配置 ====================
+        # 动态获取项目根目录下的drivers/msedgedriver
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        driver_path = os.path.join(project_root, "drivers", "msedgedriver")
 
-        # Configure service for GitHub Actions
+        # 验证驱动文件存在
+        if not os.path.exists(driver_path):
+            raise FileNotFoundError(
+                f"Edge驱动未找到: {driver_path}\n"
+                "请从以下地址下载匹配版本的驱动并放入drivers/目录:\n"
+                "https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/"
+            )
+
+        logging.info(f"使用本地Edge驱动: {driver_path}")
+
+        # ==================== 服务配置 ====================
+        service = Service(
+            executable_path=driver_path,
+            service_args=['--verbose'] if logging.getLogger().level == logging.DEBUG else None
+        )
+
+        # GitHub Actions特殊配置
         if os.getenv('GITHUB_ACTIONS') == 'true':
-            service.creation_flags = 0x80000000  # CREATE_NO_WINDOW flag
+            service.creation_flags = 0x80000000  # Windows无窗口标志
+            service.start()  # 显式启动服务避免竞争条件
 
-        driver = webdriver.Edge(service=service, options=options)
+        # ==================== 浏览器初始化 ====================
+        driver = webdriver.Edge(
+            service=service,
+            options=options,
+            service_executor_timeout=30,  # 服务启动超时30秒
+            keep_alive=True  # 保持长连接
+        )
 
-        # Anti-detection measures
+        # ==================== 反检测措施 ====================
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-                window.navigator.chrome = {runtime: {}, etc: {}};
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                    configurable: true
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                    configurable: true
+                });
+                window.navigator.chrome = {
+                    runtime: {},
+                    loadTimes: () => {},
+                    csi: () => {},
+                    app: {
+                        isInstalled: false,
+                        InstallState: 'disabled',
+                        RunningState: 'stopped'
+                    }
+                };
             """
         })
 
+        # 设置超时参数
+        driver.set_page_load_timeout(30)  # 页面加载超时30秒
+        driver.set_script_timeout(20)  # 脚本执行超时20秒
+
         return driver
+
     except Exception as e:
-        logging.error(f"Failed to setup WebDriver: {e}")
+        logging.error("WebDriver初始化失败", exc_info=True)
         raise
 
 
