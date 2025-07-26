@@ -751,7 +751,7 @@ from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from readability import Document
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
+# from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 # Configuration
 MONGO_URI = os.getenv("MONGO_URI",
