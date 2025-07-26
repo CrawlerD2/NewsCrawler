@@ -1,0 +1,11 @@
+# JetBrains IDE 文件
+.idea/
+*.iml
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 环境变量文件
+.env
+*.key
