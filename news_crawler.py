@@ -1251,23 +1251,21 @@ def get_baidu_hotsearch_data() -> Optional[Dict]:
 
 def setup_driver() -> webdriver.Edge:
     """Setup and return a configured Edge WebDriver instance."""
-    # 0. 强制定义driver_path（最优先执行）
-    driver_path = "/usr/local/bin/msedgedriver"
-    logging.info(f"初始化WebDriver，使用路径: {driver_path}")
+    # 1. 定义驱动路径（与GitHub Actions中的安装位置一致）
+    DRIVER_PATH = "/usr/local/bin/msedgedriver"
+    logging.info(f"初始化Edge驱动，路径: {DRIVER_PATH}")
 
-    # 1. 立即验证驱动文件是否存在
-    if not os.path.exists(driver_path):
+    # 2. 验证驱动文件是否存在
+    if not os.path.exists(DRIVER_PATH):
         raise FileNotFoundError(
-            f"Edge驱动未找到: {driver_path}\n"
-            "解决方案:\n"
-            "1. 确保GitHub Actions工作流中已执行:\n"
-            "   - 安装Microsoft Edge浏览器\n"
-            "   - 下载匹配版本的msedgedriver\n"
-            "   - 复制到/usr/local/bin/并设置执行权限\n"
-            "2. 下载地址: https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/"
+            f"Edge驱动未找到: {DRIVER_PATH}\n"
+            "请确保:\n"
+            "1. GitHub Actions已正确安装驱动\n"
+            "2. 驱动版本与浏览器版本匹配\n"
+            "3. 驱动文件具有执行权限"
         )
 
-    # 2. 浏览器选项配置
+    # 3. 浏览器选项配置
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
@@ -1281,13 +1279,10 @@ def setup_driver() -> webdriver.Edge:
     )
 
     try:
-        # 3. 服务配置（此时driver_path必定已定义）
-        service = Service(
-            executable_path=driver_path,
-            service_args=['--verbose'] if logging.getLogger().level == logging.DEBUG else None
-        )
+        # 4. 初始化服务
+        service = Service(executable_path=DRIVER_PATH)
 
-        # 4. 创建浏览器实例
+        # 5. 创建浏览器实例
         driver = webdriver.Edge(
             service=service,
             options=options,
@@ -1295,7 +1290,7 @@ def setup_driver() -> webdriver.Edge:
             keep_alive=True
         )
 
-        # 5. 反检测措施
+        # 6. 反检测措施
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', {
@@ -1304,7 +1299,7 @@ def setup_driver() -> webdriver.Edge:
             """
         })
 
-        # 6. 设置超时
+        # 7. 设置超时
         driver.set_page_load_timeout(25)
         driver.set_script_timeout(15)
 

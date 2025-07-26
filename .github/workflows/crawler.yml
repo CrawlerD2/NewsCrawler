@@ -430,14 +430,13 @@
 #           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 
+
 name: Baidu Hot News Crawler
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # 每 6 小时运行一次
+    - cron: "0 */6 * * *"  # 每6小时运行一次
   workflow_dispatch:
-  # push:
-  #   branches: [ main ]
 
 jobs:
   crawl:
@@ -481,26 +480,25 @@ jobs:
 
       - name: Install Microsoft Edge
         run: |
+          # 安装Edge浏览器
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-edge.gpg >/dev/null
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
           sudo apt-get update -y
           sudo apt-get install -y microsoft-edge-stable
 
-      - name: Use WebDriver from drivers/
-        run: |
-          echo "Copying msedgedriver from repository"
-          chmod +x drivers/msedgedriver
-          sudo cp drivers/msedgedriver /usr/local/bin/msedgedriver
+          # 自动下载匹配版本的WebDriver
+          EDGE_VERSION=$(microsoft-edge --version | awk '{print $3}')
+          wget -q "https://msedgedriver.azureedge.net/$EDGE_VERSION/edgedriver_linux64.zip"
+          unzip -o edgedriver_linux64.zip
+          sudo mv msedgedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/msedgedriver
-          echo "Driver path: $(which msedgedriver)"
-          msedgedriver --version
 
-      - name: Verify Edge Environment
-        run: |
-          echo "Browser version: $(microsoft-edge --version)"
-          echo "Driver version: $(msedgedriver --version)"
-          echo "Driver path: $(which msedgedriver)"
-          echo "Driver permissions: $(ls -la $(which msedgedriver))"
+          # 验证安装
+          echo "=== 环境验证 ==="
+          echo "浏览器版本: $(microsoft-edge --version)"
+          echo "驱动版本: $(msedgedriver --version)"
+          echo "驱动路径: $(which msedgedriver)"
+          echo "文件权限: $(ls -la /usr/local/bin/msedgedriver)"
 
       - name: Run crawler with monitoring
         env:
@@ -511,27 +509,35 @@ jobs:
           mkdir -p logs
           LOG_FILE="logs/crawler_$(date +'%Y%m%d_%H%M%S').log"
           START_TIME=$(date +%s)
+          
+          # 添加调试信息
+          echo "=== 系统信息 ==="
+          echo "当前目录: $(pwd)"
+          echo "Python路径: $(which python)"
+          echo "Edge路径: $(which microsoft-edge)"
+          echo "Driver路径: $(which msedgedriver)"
+          
           timeout 25m python -u news_crawler.py 2>&1 | tee $LOG_FILE
           EXIT_CODE=${PIPESTATUS[0]}
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
 
-          echo "=== Crawler Finished ==="
-          echo "Exit code: $EXIT_CODE"
-          echo "Duration: ${DURATION}s"
+          echo "=== 爬虫执行结果 ==="
+          echo "退出码: $EXIT_CODE"
+          echo "耗时: ${DURATION}s"
 
           if [ $EXIT_CODE -eq 124 ]; then
-            echo "::error::Crawler timed out after 25 minutes"
+            echo "::error::爬虫执行超时(25分钟)"
             exit 1
           elif [ $EXIT_CODE -ne 0 ]; then
-            echo "::group::Error Details (last 100 lines)"
+            echo "::group::错误详情(最后100行)"
             tail -n 100 $LOG_FILE
             echo "::endgroup::"
-            echo "::error::Crawler failed with exit code $EXIT_CODE"
+            echo "::error::爬虫执行失败，退出码: $EXIT_CODE"
             exit $EXIT_CODE
           fi
 
-          echo "::notice::Crawler completed successfully in ${DURATION}s"
+          echo "::notice::爬虫执行成功，耗时: ${DURATION}s"
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
 
       - name: Upload artifacts
@@ -571,5 +577,3 @@ jobs:
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
-
