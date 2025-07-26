@@ -823,8 +823,8 @@ def setup_driver() -> webdriver.Edge:
     try:
         # ==================== 驱动路径配置 ====================
         # 动态获取项目根目录下的drivers/msedgedriver
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        driver_path = os.path.join(project_root, "drivers", "msedgedriver")
+        service = Service(executable_path=driver_path)
+        driver = webdriver.Edge(service=service, options=options)
 
         # 验证驱动文件存在
         if not os.path.exists(driver_path):
@@ -1262,106 +1262,82 @@ def setup_driver() -> webdriver.Edge:
     # ==================== 1. 浏览器选项配置 ====================
     options = Options()
 
-    # 无头模式配置（不显示浏览器窗口）
-    options.add_argument("--headless=new")  # 新版Edge推荐使用"--headless=new"
+    # 无头模式配置
+    options.add_argument("--headless=new")
 
     # 性能优化参数
-    options.add_argument("--disable-gpu")  # 禁用GPU硬件加速（避免云环境兼容性问题）
-    options.add_argument("--no-sandbox")  # 禁用沙盒（提升容器内运行稳定性）
-    options.add_argument("--disable-dev-shm-usage")  # 限制/dev/shm使用（防止内存不足）
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
 
     # 调试与自动化参数
-    options.add_argument("--remote-debugging-port=9222")  # 启用远程调试端口
-    options.add_argument("--disable-blink-features=AutomationControlled")  # 禁用自动化控制标记
+    options.add_argument("--remote-debugging-port=9222")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--window-size=1920,1080")
 
-    # 窗口尺寸设置
-    options.add_argument("--window-size=1920,1080")  # 设置浏览器窗口大小（影响部分网页布局）
-
-    # ==================== 2. 用户代理和语言设置 ====================
+    # 用户代理和语言设置
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
-    )  # 模拟Edge浏览器最新版用户代理
+    )
+    options.add_argument("--lang=en-US,en")
 
-    options.add_argument("--lang=en-US,en")  # 设置浏览器语言为英文（减少地域化内容干扰）
-
-    # ==================== 3. GitHub Actions专用配置 ====================
+    # ==================== 2. GitHub Actions专用配置 ====================
     if os.getenv('GITHUB_ACTIONS') == 'true':
-        options.add_argument("--disable-extensions")  # 禁用所有扩展
-        options.add_argument("--disable-software-rasterizer")  # 禁用软件光栅化
-        options.add_argument("--disable-logging")  # 禁用冗余日志
-        options.add_argument("--log-level=3")  # 日志级别设置为警告及以上
-        options.add_argument("--single-process")  # 单进程模式（提升容器稳定性）
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--single-process")
 
-    # ==================== 4. 驱动路径配置 ====================
+    # ==================== 3. 驱动路径配置 ====================
     try:
-        # 动态获取项目根目录路径
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        driver_path = os.path.join(project_root, "drivers", "msedgedriver")
+        # 直接使用系统路径（与YAML安装位置一致）
+        driver_path = "/usr/local/bin/msedgedriver"
 
-        # 驱动文件存在性验证
+        # 验证驱动是否存在
         if not os.path.exists(driver_path):
             raise FileNotFoundError(
-                f"EdgeDriver not found at {driver_path}. "
-                f"Please download from https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/"
+                f"Edge驱动未找到: {driver_path}\n"
+                "GitHub Actions用户请确保YAML已安装驱动到/usr/local/bin/\n"
+                "本地用户请下载驱动并设置正确路径"
             )
 
-        # 记录调试信息
-        logging.info(f"Initializing Edge WebDriver from: {driver_path}")
+        logging.info(f"使用Edge驱动路径: {driver_path}")
 
-        # ==================== 5. 服务配置 ====================
+        # ==================== 4. 服务配置 ====================
         service = Service(
             executable_path=driver_path,
-
-            # 服务启动参数
-            service_args=[
-                '--verbose',  # 启用详细日志（调试时使用）
-                '--log-path=edgedriver.log'  # 日志输出文件
-            ] if logging.getLogger().level == logging.DEBUG else None
+            service_args=['--verbose'] if logging.getLogger().level == logging.DEBUG else None
         )
 
-        # GitHub Actions特殊配置
-        if os.getenv('GITHUB_ACTIONS') == 'true':
-            service.creation_flags = 0x80000000  # CREATE_NO_WINDOW flag (Windows)
-            service.start()  # 显式启动服务（避免某些环境下的竞争条件）
-
-        # ==================== 6. 浏览器实例化 ====================
+        # ==================== 5. 浏览器初始化 ====================
         driver = webdriver.Edge(
             service=service,
             options=options,
-            # 超时设置（单位：秒）
             service_executor_timeout=30,
-            keep_alive=True  # 保持长连接
+            keep_alive=True
         )
 
-        # ==================== 7. 反检测措施 ====================
-        driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": """
-                    // 隐藏navigator.webdriver属性
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    });
+        # ==================== 6. 反检测措施 ====================
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+                window.navigator.chrome = {
+                    runtime: {},
+                    loadTimes: () => {},
+                    csi: () => {}
+                };
+            """
+        })
 
-                    // 覆盖语言偏好
-                    Object.defineProperty(navigator, 'languages', {
-                        get: () => ['en-US', 'en']
-                    });
-
-                    // 模拟Chrome运行时对象
-                    window.navigator.chrome = {
-                        runtime: {},
-                        loadTimes: () => {},
-                        csi: () => {}
-                    };
-                """
-            }
-        )
-
-        # 设置页面加载超时（毫秒）
-        driver.set_page_load_timeout(30000)
+        # 设置超时
+        driver.set_page_load_timeout(30)
+        driver.set_script_timeout(20)
 
         return driver
 
